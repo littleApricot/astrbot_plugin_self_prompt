@@ -12,10 +12,10 @@
 
 ## 安装与使用
 
-适配 AstrBot 4.29.1。推荐在插件市场添加以下插件源，找到“自维护提示词”并安装：
+适配 AstrBot 4.29.1。与“回复判断”“群聊表情图库”共用同一个插件源。已添加该源时，刷新列表后找到“自维护提示词”并安装；首次使用时添加以下地址：
 
 ```text
-https://raw.githubusercontent.com/littleApricot/astrbot_plugin_self_prompt/main/plugins.json
+https://raw.githubusercontent.com/littleApricot/astrbot_plugin_reply_gate/main/plugins.json
 ```
 
 也可以在插件页通过仓库地址安装：
@@ -71,4 +71,6 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ASTRBOT_SOURCE:$PWD/.." \
 
 ## 发布更新
 
-发布新版本时，同时修改 `metadata.yaml` 的 `version`、`plugins.json` 中的两个版本号及 `download_url` 的版本标签。提交后创建同名 Git 标签并推送到 GitHub，再发布对应 Release。插件源中的下载地址固定到版本标签，避免安装时版本信息与代码不一致。
+发布新版本时，同时修改本仓库 `metadata.yaml` 的 `version`、`plugins.json` 中的两个版本号及 `download_url` 的版本标签。提交后创建同名 Git 标签并推送到 GitHub，再发布对应 Release。
+
+将更新后的插件条目同步到 `littleApricot/astrbot_plugin_reply_gate` 仓库的共享 `plugins.json`，保留其他插件条目；在共享源仓库运行 `python scripts/prepare_release.py`，生成匹配的 `plugins-md5.json`，将列表和校验文件一起提交发布。用户继续使用共享源地址安装和更新。下载地址固定到版本标签，避免版本信息与代码不一致。
