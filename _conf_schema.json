@@ -1,0 +1,13 @@
+{
+  "auto_memory_enabled": {
+    "type": "bool",
+    "description": "每累计 100 条聊天消息自动整理记忆",
+    "default": true,
+    "hint": "每个会话、每个人格分别累计用户发言和机器人最终回复，未回复的用户消息也计数；使用该会话的回复模型。"
+  },
+  "auto_memory_timeout": {
+    "type": "int",
+    "description": "每次记忆整理模型调用超时秒数",
+    "default": 60
+  }
+}
