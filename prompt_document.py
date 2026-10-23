@@ -1,4 +1,4 @@
-"""Maintain three editable sections inside an AstrBot persona prompt."""
+"""Separate owner-maintained instructions from the bot's editable sections."""
 
 from __future__ import annotations
 
@@ -10,44 +10,32 @@ SECTIONS = {
     "output_preferences": "输出偏好要求",
     "memory": "其他需要记住的事情",
 }
-START = "<!-- self_prompt:v1 -->"
-END = "<!-- /self_prompt:v1 -->"
+START = "<!-- self_prompt:editable:v2 -->"
+END = "<!-- /self_prompt:editable:v2 -->"
+FIXED_START = "<!-- self_prompt:fixed:v2 -->"
+FIXED_END = "<!-- /self_prompt:fixed:v2 -->"
+LEGACY_START = "<!-- self_prompt:v1 -->"
+LEGACY_END = "<!-- /self_prompt:v1 -->"
 
 
 def revision(prompt: str) -> str:
-    """Return a content revision for detecting stale edits.
-
-    Args:
-        prompt: Current persisted persona prompt.
-
-    Returns:
-        SHA-256 of the complete prompt.
-    """
+    """Return a revision covering both fixed and editable content."""
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
-def read_sections(prompt: str) -> dict[str, str]:
-    """Read managed sections, treating a legacy prompt as the persona section.
-
-    Args:
-        prompt: Complete persona prompt, including optional surrounding content.
-
-    Returns:
-        All three section contents.
-
-    Raises:
-        ValueError: Managed markers are incomplete or repeated.
-    """
-    if START not in prompt and END not in prompt:
-        return {key: prompt if key == "persona" else "" for key in SECTIONS}
-    if prompt.count(START) != 1 or prompt.count(END) != 1:
+def _bounds(prompt: str, opening: str, closing: str) -> tuple[int, int]:
+    if prompt.count(opening) != 1 or prompt.count(closing) != 1:
         raise ValueError("invalid_document_markers")
-    begin = prompt.index(START) + len(START)
-    end = prompt.index(END)
+    begin = prompt.index(opening) + len(opening)
+    end = prompt.index(closing)
     if begin > end:
         raise ValueError("invalid_document_markers")
-    body = prompt[begin:end]
+    return begin, end
+
+
+def _section_spans(body: str) -> dict[str, re.Match]:
     result = {}
+    previous_end = 0
     for key in SECTIONS:
         opening = f"<!-- self_prompt:{key} -->"
         closing = f"<!-- /self_prompt:{key} -->"
@@ -58,53 +46,115 @@ def read_sections(prompt: str) -> dict[str, str]:
             body,
             re.DOTALL,
         )
-        if match is None:
+        if match is None or match.start() < previous_end:
             raise ValueError("invalid_section_markers")
-        result[key] = match.group(1)
+        result[key] = match
+        previous_end = match.end()
+    if len(re.findall(r"<!-- /?self_prompt:[^>]*-->", body)) != 2 * len(SECTIONS):
+        raise ValueError("unexpected_section_markers")
     return result
 
 
+def _is_split(prompt: str) -> bool:
+    return any(marker in prompt for marker in (START, END, FIXED_START, FIXED_END))
+
+
+def _split_bounds(prompt: str) -> tuple[int, int, int, int]:
+    begin, end = _bounds(prompt, START, END)
+    fixed_begin, fixed_end = _bounds(prompt, FIXED_START, FIXED_END)
+    if not (
+        fixed_end + len(FIXED_END) <= begin - len(START)
+        or end + len(END) <= fixed_begin - len(FIXED_START)
+    ):
+        raise ValueError("overlapping_fixed_and_editable")
+    _section_spans(prompt[begin:end])
+    return begin, end, fixed_begin, fixed_end
+
+
+def _legacy_sections(prompt: str) -> dict[str, str]:
+    if LEGACY_START not in prompt and LEGACY_END not in prompt:
+        return {key: prompt if key == "persona" else "" for key in SECTIONS}
+    begin, end = _bounds(prompt, LEGACY_START, LEGACY_END)
+    result = {
+        key: match.group(1) for key, match in _section_spans(prompt[begin:end]).items()
+    }
+    # Existing surrounding notes also remain bot-editable after migration.
+    surrounding = [
+        prompt[: begin - len(LEGACY_START)],
+        result["persona"],
+        prompt[end + len(LEGACY_END) :],
+    ]
+    result["persona"] = "\n\n".join(part for part in surrounding if part)
+    return result
+
+
+def ensure_layout(prompt: str) -> str:
+    """Migrate existing content into the editable part; leave fixed content empty."""
+    if _is_split(prompt):
+        _split_bounds(prompt)
+        return prompt
+    sections = _legacy_sections(prompt)
+    parts = [
+        "# 你维护的固定设定",
+        FIXED_START + "\n\n" + FIXED_END,
+        "# 机器人可维护内容",
+        START,
+    ]
+    for key, title in SECTIONS.items():
+        parts.append(
+            f"## {title}\n<!-- self_prompt:{key} -->\n"
+            f"{sections[key]}\n<!-- /self_prompt:{key} -->"
+        )
+    parts.append(END)
+    return "\n\n".join(parts)
+
+
+def read_sections(prompt: str) -> dict[str, str]:
+    """Read only bot-editable sections, retaining compatibility with old prompts."""
+    if not _is_split(prompt):
+        return _legacy_sections(prompt)
+    begin, end, _, _ = _split_bounds(prompt)
+    return {
+        key: match.group(1) for key, match in _section_spans(prompt[begin:end]).items()
+    }
+
+
+def read_fixed(prompt: str) -> str:
+    """Read owner instructions as reference; tools cannot write this field."""
+    if not _is_split(prompt):
+        _legacy_sections(prompt)
+        return ""
+    _, _, begin, end = _split_bounds(prompt)
+    content = prompt[begin:end]
+    return (
+        content[1:-1]
+        if content.startswith("\n") and content.endswith("\n")
+        else content
+    )
+
+
+def assert_editable_change(original: str, updated: str) -> None:
+    """Reject writes changing any bytes outside the editable body."""
+    baseline = ensure_layout(original)
+    begin, end, _, _ = _split_bounds(baseline)
+    new_begin, new_end, _, _ = _split_bounds(updated)
+    if (baseline[:begin], baseline[end:]) != (updated[:new_begin], updated[new_end:]):
+        raise ValueError("fixed_prompt_modified")
+
+
 def replace_section(prompt: str, section: str, content: str) -> str:
-    """Replace one section while preserving other and surrounding content.
-
-    Args:
-        prompt: Current complete persona prompt.
-        section: One of persona, output_preferences, or memory.
-        content: Complete replacement content for that section; empty clears it.
-
-    Returns:
-        Updated complete persona prompt.
-
-    Raises:
-        ValueError: A section, content value, or existing marker is invalid.
-    """
+    """Replace one editable section while preserving the fixed part byte for byte."""
     if section not in SECTIONS:
         raise ValueError("unknown_section")
     if not isinstance(content, str) or any(
         marker in content for marker in ("<!-- self_prompt:", "<!-- /self_prompt:")
     ):
         raise ValueError("invalid_section_content")
-    sections = read_sections(prompt)
-    if START not in prompt:
-        sections[section] = content
-        parts = [START]
-        for key, title in SECTIONS.items():
-            parts.append(
-                f"## {title}\n<!-- self_prompt:{key} -->\n"
-                f"{sections[key]}\n<!-- /self_prompt:{key} -->"
-            )
-        parts.append(END)
-        return "\n\n".join(parts)
-
-    begin = prompt.index(START) + len(START)
-    end = prompt.index(END)
-    body = prompt[begin:end]
-    pattern = re.compile(
-        re.escape(f"<!-- self_prompt:{section} -->\n")
-        + r"(.*?)"
-        + re.escape(f"\n<!-- /self_prompt:{section} -->"),
-        re.DOTALL,
+    baseline = ensure_layout(prompt)
+    begin, end, _, _ = _split_bounds(baseline)
+    match = _section_spans(baseline[begin:end])[section]
+    updated = (
+        baseline[: begin + match.start(1)] + content + baseline[begin + match.end(1) :]
     )
-    match = pattern.search(body)
-    assert match is not None  # read_sections validated the document.
-    return prompt[: begin + match.start(1)] + content + prompt[begin + match.end(1) :]
+    assert_editable_change(prompt, updated)
+    return updated

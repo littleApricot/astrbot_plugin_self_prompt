@@ -18,7 +18,12 @@ from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_self_prompt.main import SelfPrompt
 from astrbot_plugin_self_prompt.prompt_document import (
     END,
+    FIXED_END,
+    FIXED_START,
     START,
+    assert_editable_change,
+    ensure_layout,
+    read_fixed,
     read_sections,
     replace_section,
     revision,
@@ -133,13 +138,15 @@ class PersonaToolTests(unittest.IsolatedAsyncioTestCase):
         before = (await self.manager.get_persona("default")).system_prompt
         result = json.loads(await self.plugin.get_self_prompt(self.event))
         self.assertTrue(result["ok"])
-        self.assertEqual(result["sections"]["persona"], before)
+        self.assertEqual(result["sections"], read_sections(before))
+        self.assertEqual(result["fixed_prompt"], read_fixed(before))
         self.assertEqual(
             (await self.manager.get_persona("default")).system_prompt, before
         )
         self.assertIn("自维护提示词", self.req.system_prompt)
 
     async def test_three_sections_persist_and_are_loaded_into_the_next_request(self):
+        existing_backups = len(list((self.root / "data/backups").rglob("*.txt")))
         expected = {
             "persona": "My nickname is Echo, and I am calm.",
             "output_preferences": "Prefer short Chinese replies.",
@@ -166,7 +173,7 @@ class PersonaToolTests(unittest.IsolatedAsyncioTestCase):
         for content in expected.values():
             self.assertIn(content, next_request.system_prompt)
         backups = list((self.root / "data/backups").rglob("*.txt"))
-        self.assertEqual(len(backups), 3)
+        self.assertEqual(len(backups), existing_backups + 3)
 
     async def test_stale_and_concurrent_edits_do_not_erase_new_information(self):
         current = json.loads(await self.plugin.get_self_prompt(self.event))
@@ -475,3 +482,156 @@ class PersonaToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(actual, "".join(expected))
         self.assertEqual(self.plugin.memory_queue.pending_count(), 0)
+
+    async def set_fixed(self, content):
+        persona = await self.manager.get_persona("default")
+        prompt = ensure_layout(persona.system_prompt)
+        old = read_fixed(prompt)
+        prompt = prompt.replace(
+            FIXED_START + "\n" + old + "\n" + FIXED_END,
+            FIXED_START + "\n" + content + "\n" + FIXED_END,
+        )
+        await self.manager.update_persona("default", system_prompt=prompt)
+        return prompt
+
+    async def test_tools_only_update_editable_parts_and_fixed_survives_reload(self):
+        fixed = "Only the owner changes this.\nKeep exact whitespace.  \n"
+        original = await self.set_fixed(fixed)
+        for section in ("persona", "output_preferences", "memory"):
+            current = json.loads(await self.plugin.get_self_prompt(self.event))
+            self.assertEqual(current["fixed_prompt"], fixed)
+            result = json.loads(
+                await self.plugin.update_self_prompt(
+                    self.event,
+                    section,
+                    f"New {section}",
+                    current["revision"],
+                )
+            )
+            self.assertTrue(result["ok"])
+        fresh = PersonaManager(self.db, self.acm)
+        await fresh.initialize()
+        updated = (await fresh.get_persona("default")).system_prompt
+        assert_editable_change(original, updated)
+        self.assertEqual(read_fixed(updated), fixed)
+        self.context.persona_manager = fresh
+        request = ProviderRequest(conversation=SimpleNamespace(persona_id=None))
+        with patch("astrbot.core.astr_main_agent.SkillManager") as skills:
+            skills.return_value.list_skills.return_value = []
+            await _ensure_persona_and_skills(request, {}, self.context, self.event)
+        self.assertIn(fixed, request.system_prompt)
+        self.assertIn("New memory", request.system_prompt)
+
+    async def test_tool_rejects_fixed_targets_marker_injection_and_stale_fixed_edits(
+        self,
+    ):
+        await self.set_fixed("Owner rule")
+        current = json.loads(await self.plugin.get_self_prompt(self.event))
+        for section in ("fixed_prompt", "fixed"):
+            result = json.loads(
+                await self.plugin.update_self_prompt(
+                    self.event,
+                    section,
+                    "replace owner rule",
+                    current["revision"],
+                )
+            )
+            self.assertFalse(result["ok"])
+        result = json.loads(
+            await self.plugin.update_self_prompt(
+                self.event,
+                "memory",
+                FIXED_END + "replace owner rule",
+                current["revision"],
+            )
+        )
+        self.assertFalse(result["ok"])
+        await self.set_fixed("New owner rule")
+        result = json.loads(
+            await self.plugin.update_self_prompt(
+                self.event,
+                "memory",
+                "stale",
+                current["revision"],
+            )
+        )
+        self.assertEqual(result["error"], "revision_conflict")
+        self.assertEqual(
+            read_fixed((await self.manager.get_persona("default")).system_prompt),
+            "New owner rule",
+        )
+
+    async def test_persistence_boundary_rejects_direct_fixed_changes(self):
+        original = await self.set_fixed("Owner rule")
+        tampered = original.replace("Owner rule", "Replaced rule")
+        with self.assertRaisesRegex(ValueError, "fixed_prompt_modified"):
+            await self.plugin._persist("default", original, tampered)
+        self.assertEqual(
+            (await self.manager.get_persona("default")).system_prompt, original
+        )
+
+    async def test_automatic_summary_sees_fixed_as_readonly_and_preserves_it(self):
+        original = await self.set_fixed("Owner's fixed instruction")
+        provider = self.auto_context('{"updates":{"memory":"New learned fact"}}')
+        with patch.object(self.plugin, "_start_worker"):
+            for number in range(100):
+                await self.plugin.collect_history(self.message_event(number))
+        await self.plugin._process_ready()
+        payload = json.loads(provider.text_chat.call_args.kwargs["prompt"])
+        self.assertEqual(payload["fixed_prompt"], "Owner's fixed instruction")
+        updated = (await self.manager.get_persona("default")).system_prompt
+        assert_editable_change(original, updated)
+        self.assertEqual(read_sections(updated)["memory"], "New learned fact")
+        self.assertEqual(self.plugin.memory_queue.pending_count(), 0)
+
+    async def test_automatic_summary_cannot_return_a_fixed_prompt_update(self):
+        original = await self.set_fixed("Owner rule")
+        self.auto_context('{"updates":{"fixed_prompt":"tampered"}}')
+        with patch.object(self.plugin, "_start_worker"):
+            for number in range(100):
+                await self.plugin.collect_history(self.message_event(number))
+        await self.plugin._process_ready()
+        self.assertEqual(
+            (await self.manager.get_persona("default")).system_prompt, original
+        )
+        self.assertEqual(self.plugin.memory_queue.pending_count(), 100)
+
+    async def test_manual_fixed_edit_during_summary_keeps_the_batch_for_retry(self):
+        await self.set_fixed("Owner rule before")
+        provider = self.auto_context()
+
+        async def edit_while_running(**kwargs):
+            await self.set_fixed("Owner rule after")
+            return LLMResponse(
+                "assistant", completion_text='{"updates":{"memory":"stale"}}'
+            )
+
+        provider.text_chat.side_effect = edit_while_running
+        with patch.object(self.plugin, "_start_worker"):
+            for number in range(100):
+                await self.plugin.collect_history(self.message_event(number))
+        await self.plugin._process_ready()
+        prompt = (await self.manager.get_persona("default")).system_prompt
+        self.assertEqual(read_fixed(prompt), "Owner rule after")
+        self.assertNotIn("stale", read_sections(prompt)["memory"])
+        self.assertEqual(self.plugin.memory_queue.pending_count(), 100)
+
+    async def test_startup_migrates_existing_personas_to_editable_with_backups(self):
+        plain = "Existing persona and manually written instructions\n"
+        await self.manager.update_persona("default", system_prompt=plain)
+        await self.manager.create_persona("other", "Another existing persona")
+        await self.plugin.initialize()
+        for persona_id, expected in [
+            ("default", plain),
+            ("other", "Another existing persona"),
+        ]:
+            prompt = (await self.manager.get_persona(persona_id)).system_prompt
+            self.assertEqual(read_fixed(prompt), "")
+            self.assertEqual(read_sections(prompt)["persona"], expected)
+        backups = [p.read_text() for p in (self.root / "data/backups").rglob("*.txt")]
+        self.assertIn(plain, backups)
+        first = (await self.manager.get_persona("default")).system_prompt
+        await self.plugin.initialize()
+        self.assertEqual(
+            (await self.manager.get_persona("default")).system_prompt, first
+        )

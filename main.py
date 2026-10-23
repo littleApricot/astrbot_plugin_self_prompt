@@ -16,16 +16,27 @@ from astrbot.api.star import Context, Star, StarTools
 
 from .auto_memory import SUMMARY_PROMPT, apply_summary, history_chunks
 from .memory_queue import MemoryQueue
-from .prompt_document import SECTIONS, read_sections, replace_section, revision
+from .prompt_document import (
+    SECTIONS,
+    assert_editable_change,
+    ensure_layout,
+    read_fixed,
+    read_sections,
+    replace_section,
+    revision,
+)
 
 BATCH_SIZE = 100
 INPUT_CHAR_LIMIT = 60_000
 
 TOOL_GUIDANCE = """
 [自维护提示词]
-你可以用 get_self_prompt 读取当前人格的提示词，用 update_self_prompt 修改指定部分。
-三个部分分别是 persona（性格、人设、昵称等）、output_preferences（输出偏好要求）、
-memory（其他需要长期记住的事情）。这些内容保存在当前人格中，共用该人格的会话共享。
+当前人格分为用户维护的固定设定，以及机器人可维护内容。固定设定只能由用户手动修改，
+是你的约束；可维护内容不得用来覆盖或抵消固定设定，冲突时以固定设定为准。
+get_self_prompt 返回只读的 fixed_prompt，以及可编辑的 sections 和完整 revision。
+update_self_prompt 只能修改 sections 中的指定部分，不能修改 fixed_prompt。
+可维护内容中三个部分分别是 persona（性格、人设、昵称等）、output_preferences（输出偏好）、
+memory（其他记忆）。用户也可以手动编辑可维护内容。共用该人格的会话共享这些内容。
 遇到明确的人设、长期输出偏好、值得记住的事实或对旧信息的纠正时，可以主动维护。
 修改前先读取最新内容和 revision，合并保留仍然有效的内容，删除已被纠正的旧信息，
 避免重复记录；临时玩笑和一时的情绪不要直接当成永久设定。
@@ -54,9 +65,26 @@ class SelfPrompt(Star):
             tool.parameters["properties"]["section"]["enum"] = list(SECTIONS)
 
     async def initialize(self) -> None:
-        """Resume complete persisted batches after startup."""
+        """Migrate existing personas and resume persisted batches after startup."""
+        for persona in list(self.context.persona_manager.personas):
+            try:
+                await self._ensure_layout(persona.persona_id)
+            except Exception as exc:
+                self.logger.warning(
+                    "Prompt layout migration failed: %s", type(exc).__name__
+                )
         if self.config.get("auto_memory_enabled", True):
             self._start_worker()
+
+    async def _ensure_layout(self, persona_id: str) -> None:
+        async with self._locks.setdefault(persona_id, asyncio.Lock()):
+            persona = await self.context.persona_manager.get_persona(persona_id)
+            original = persona.system_prompt
+            updated = ensure_layout(original)
+            if updated != original and not await self._persist(
+                persona_id, original, updated
+            ):
+                raise ValueError("save_not_confirmed")
 
     def _start_worker(self) -> None:
         if self._worker is None or self._worker.done():
@@ -206,6 +234,7 @@ class SelfPrompt(Star):
         if len(records) != BATCH_SIZE:
             return
         persona_id = scope["persona_id"]
+        await self._ensure_layout(persona_id)
         persona = await self.context.persona_manager.get_persona(persona_id)
         original = persona.system_prompt
         staged = original
@@ -222,6 +251,7 @@ class SelfPrompt(Star):
             header = {
                 "origin": scope["origin"],
                 "persona_id": persona_id,
+                "fixed_prompt": read_fixed(staged),
                 "sections": sections,
             }
             overhead = (
@@ -264,6 +294,7 @@ class SelfPrompt(Star):
         )
 
     async def _persist(self, persona_id: str, original: str, updated: str) -> bool:
+        assert_editable_change(original, updated)
         directory = self._backup_dir / hashlib.sha256(persona_id.encode()).hexdigest()
         directory.mkdir(parents=True, exist_ok=True)
         backup = directory / f"{revision(original)}.txt"
@@ -297,6 +328,11 @@ class SelfPrompt(Star):
         persona_id = await self._selected_persona(event, req.conversation)
         if not persona_id:
             return
+        try:
+            await self._ensure_layout(persona_id)
+        except Exception as exc:
+            self.logger.warning("Prompt layout unavailable: %s", type(exc).__name__)
+            return
         event.set_extra("self_prompt_persona_id", persona_id)
         event.set_extra("self_prompt_model", req.model)
         req.system_prompt = (req.system_prompt or "") + "\n\n" + TOOL_GUIDANCE
@@ -306,8 +342,8 @@ class SelfPrompt(Star):
         """Read the current persona prompt's three editable sections and revision.
 
         Returns:
-            JSON with ok, persona_id, revision and sections. Call this before editing;
-            a legacy prompt appears in persona until the first successful update.
+            JSON with ok, persona_id, revision, read-only fixed_prompt and editable
+            sections. Call this before editing; only sections may be changed.
         """
         persona_id = event.get_extra("self_prompt_persona_id")
         if not persona_id:
@@ -320,6 +356,7 @@ class SelfPrompt(Star):
                     "ok": True,
                     "persona_id": persona_id,
                     "revision": revision(prompt),
+                    "fixed_prompt": read_fixed(prompt),
                     "sections": read_sections(prompt),
                 },
                 ensure_ascii=False,
@@ -335,7 +372,7 @@ class SelfPrompt(Star):
         content: str,
         expected_revision: str,
     ) -> str:
-        """Persist one part of your current persona prompt as temporary long-term memory.
+        """Update one bot-editable section; owner-maintained fixed instructions are read-only.
 
         Args:
             section(string): Part to replace: persona for character, identity and
