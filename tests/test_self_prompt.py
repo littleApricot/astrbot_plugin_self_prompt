@@ -48,7 +48,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotRegex(wire, r"revision|version_id|版本")
         memory = json.loads(await self.p.get_self_prompt(self.s.event))
         self.assertEqual(set(memory), {"ok", "fixed_prompt", "sections"})
-        self.assertEqual(set(memory["sections"]), {"persona", "output_preferences"})
+        self.assertEqual(set(memory["sections"]), {"persona", "output_preferences", "nicknames"})
         self.assertNotIn("self_prompt:", self.s.request.system_prompt)
         self.assertNotIn("版本", self.s.request.system_prompt)
         req = self.s.request
@@ -424,7 +424,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         first = owner_edit(
             original,
             "Exact fixed  \n",
-            {"persona": "First", "output_preferences": "Short"},
+            {"persona": "First", "output_preferences": "Short", "nicknames": "Echo"},
         )
         await self.s.manager.update_persona("default", system_prompt=first)
         second = replace_section(first, "persona", "Second")

@@ -24,7 +24,7 @@
   },
   "long_term_memory_max_bytes": {
     "type": "int",
-    "description": "可整理长期记忆字节上限",
+    "description": "可整理常驻内容字节上限",
     "default": 8000,
     "hint": "按 UTF-8 字节计算，不包含用户固定设定。超额的已有内容保留，自动更新需要符合预算。"
   },

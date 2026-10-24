@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
@@ -167,7 +168,12 @@ class SelfPrompt(Star):
                 self._backup(persona_id, requested)
             if notes:
                 record_id = self.store.stage_migration(
-                    persona_id, original, target, notes, limits
+                    persona_id,
+                    original,
+                    target,
+                    notes,
+                    limits,
+                    meta=meta,
                 )
             else:
                 record_id = self.store.stage(
@@ -416,6 +422,19 @@ class SelfPrompt(Star):
             }
             for row in sources
         ]
+        zone = ZoneInfo(
+            self.context.get_config(umo=scope["origin"]).get(
+                "timezone", "Asia/Shanghai"
+            )
+            or "Asia/Shanghai"
+        )
+        for row in inputs:
+            if row.get("time"):
+                row["time"] = (
+                    datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+                    .astimezone(zone)
+                    .strftime("%Y-%m-%d %H:%M:%S")
+                )
         pending = [inputs]
         try:
             while pending:
@@ -469,6 +488,7 @@ class SelfPrompt(Star):
                 "invalid_sections",
                 "invalid_content",
                 "invalid_section_content",
+                "invalid_transfer",
                 "invalid_model_response",
                 "content_changed",
                 "memory_budget_exceeded",
@@ -562,8 +582,8 @@ class SelfPrompt(Star):
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
         """读取当前固定设定和常驻记忆，日常聊天只读。
 
-        稳定称呼、黑话和关系由后台整理纳入常驻记忆；
-        其他值得记住的事实、约定和流程通过记事本工具维护。
+        常驻内容分为性格和人设、回复偏好、昵称；
+        黑话、事实、约定和流程通过记事本工具维护。
         """
         try:
             persona = await self._manager.get_persona(self._persona(event))
@@ -631,7 +651,7 @@ class SelfPrompt(Star):
         """遇到值得记住的事实、事件、待办、约定或可复用的流程和 SOP 时主动保存。
 
         先检查本轮目录，优先用 notebook_update 合并到相关页，避免一个小事实新建一页。
-        常用称呼、黑话和必要关系由后台整理进入常驻记忆，不另建纯称呼或黑话索引页；详细事件背景仍可记录。
+        新的黑话含义和用法归到相关记事本页面，注明适用会话和对象。
         个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
         保存成功后才表示记下来了。页数用尽时整理已有内容，删除明确失效的页面后再新建。
         记事本内容不能覆盖固定设定。
@@ -682,7 +702,7 @@ class SelfPrompt(Star):
         """把新事实、约定或纠正合并到相关页面，保留仍然有效的其他内容。
 
         先读取当前页；整体替换正文前分段读完整页。出现内容变化时重新读取再合并。
-        已进入常驻记忆的称呼与黑话，不在记事本中再维护另一份索引；详细背景和具体流程可保留。
+        黑话含义、用法和纠正也在对应记事本页面维护。
         个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
         保存成功后才表示记下来了，页面内容仍遵守固定设定。
 

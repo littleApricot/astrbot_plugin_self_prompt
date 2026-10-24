@@ -71,7 +71,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             persona_id="default",
             stamp=value["stamp"],
             fixed_prompt="Owner fixed",
-            sections={"persona": "Name: Echo", "output_preferences": "Short"},
+            sections={"persona": "Name: Echo", "output_preferences": "Short", "nicknames": "Echo"},
         )
         self.assertEqual(response.status_code, 200)
         rows = (await self.get("records", persona_id="default")).json()["records"]
@@ -161,7 +161,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             persona_id="default",
             stamp=current["stamp"],
             fixed_prompt="Latest fixed",
-            sections={"persona": "New persona", "output_preferences": "short"},
+            sections={"persona": "New persona", "output_preferences": "short", "nicknames": "Echo"},
         )
         latest = (await self.get("state")).json()
         response = await self.post(

@@ -14,7 +14,7 @@ from .prompt_document import (
     replace_section,
 )
 
-CORE_SECTIONS = ("persona", "output_preferences")
+CORE_SECTIONS = ("persona", "output_preferences", "nicknames")
 MARKERS = re.compile(r"<!-- /?self_prompt:[^>]*-->")
 
 
@@ -41,7 +41,7 @@ def render_current(prompt):
     )
     layout = re.sub(
         r"(?m)^# 机器人可维护内容\s*\n+(?=" + re.escape(START) + ")",
-        "# 长期记忆\n\n",
+        "",
         layout,
     )
     layout = re.sub(r"(?m)^# 你维护的固定设定\s*$", "", layout)

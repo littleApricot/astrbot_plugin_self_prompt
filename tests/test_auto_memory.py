@@ -39,6 +39,7 @@ class SummaryFormatTests(unittest.TestCase):
                 "persona": "New character",
                 "output_preferences": "Short replies",
                 "memory": "",
+                "nicknames": "",
             },
         )
 

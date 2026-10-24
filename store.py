@@ -258,26 +258,34 @@ class Store(MemoryQueue):
             )
         return record_id
 
-    def stage_migration(self, persona_id, original, content, notes, limits):
+    def stage_migration(
+        self, persona_id, original, content, notes, limits, *, meta=None
+    ):
         """Stage all imported pages and the source snapshot in one transaction."""
+        meta = meta or {"kind": "migration"}
+        kind = meta["kind"]
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute(
-                "SELECT id FROM memory_records WHERE persona_id=? AND kind='migration' AND state='prepared' AND original=? AND content=?",
-                (persona_id, original, content),
+                "SELECT id FROM memory_records WHERE persona_id=? AND kind=? AND state='prepared' AND original=? AND content=?",
+                (persona_id, kind, original, content),
             ).fetchone()
             if previous:
                 return previous["id"]
             pages = self._pages(db, persona_id)
             additions = []
+            title = "群聊黑话" if kind == "automatic" else "迁移记忆"
+            description = (
+                "群聊黑话的含义、适用对象与用法"
+                if kind == "automatic"
+                else "升级前保存的其他记忆，可按主题继续整理"
+            )
             for offset in range(0, len(notes), 12000):
                 number = offset // 12000 + 1
                 page = {
                     "page_id": uuid.uuid4().hex[:16],
-                    "title": "迁移记忆"
-                    if len(notes) <= 12000
-                    else f"迁移记忆 {number}",
-                    "description": "升级前保存的其他记忆，可按主题继续整理",
+                    "title": title if len(notes) <= 12000 else f"{title} {number}",
+                    "description": description,
                     "content": notes[offset : offset + 12000],
                 }
                 additions.append(page)
@@ -303,14 +311,14 @@ class Store(MemoryQueue):
                 (
                     record_id,
                     persona_id,
-                    "migration",
+                    kind,
                     "prepared",
                     now(),
                     original,
                     content,
-                    "[]",
-                    None,
-                    None,
+                    encode(meta.get("sources") or []),
+                    meta.get("scope"),
+                    meta.get("last_id"),
                     "",
                 ),
             )

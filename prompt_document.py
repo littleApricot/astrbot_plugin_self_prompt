@@ -6,9 +6,10 @@ import hashlib
 import re
 
 SECTIONS = {
-    "persona": "性格和人设（包括昵称）",
-    "output_preferences": "输出偏好要求",
+    "persona": "性格和人设",
+    "output_preferences": "回复偏好",
     "memory": "其他需要记住的事情",
+    "nicknames": "昵称",
 }
 START = "<!-- self_prompt:editable:v2 -->"
 END = "<!-- /self_prompt:editable:v2 -->"
@@ -39,6 +40,8 @@ def _section_spans(body: str) -> dict[str, re.Match]:
     for key in SECTIONS:
         opening = f"<!-- self_prompt:{key} -->"
         closing = f"<!-- /self_prompt:{key} -->"
+        if key == "nicknames" and opening not in body and closing not in body:
+            continue
         if body.count(opening) != 1 or body.count(closing) != 1:
             raise ValueError("invalid_section_markers")
         match = re.search(
@@ -50,7 +53,7 @@ def _section_spans(body: str) -> dict[str, re.Match]:
             raise ValueError("invalid_section_markers")
         result[key] = match
         previous_end = match.end()
-    if len(re.findall(r"<!-- /?self_prompt:[^>]*-->", body)) != 2 * len(SECTIONS):
+    if len(re.findall(r"<!-- /?self_prompt:[^>]*-->", body)) != 2 * len(result):
         raise ValueError("unexpected_section_markers")
     return result
 
@@ -75,7 +78,7 @@ def _legacy_sections(prompt: str) -> dict[str, str]:
     if LEGACY_START not in prompt and LEGACY_END not in prompt:
         return {key: prompt if key == "persona" else "" for key in SECTIONS}
     begin, end = _bounds(prompt, LEGACY_START, LEGACY_END)
-    result = {
+    result = {key: "" for key in SECTIONS} | {
         key: match.group(1) for key, match in _section_spans(prompt[begin:end]).items()
     }
     # Existing surrounding notes also remain bot-editable after migration.
@@ -91,8 +94,16 @@ def _legacy_sections(prompt: str) -> dict[str, str]:
 def ensure_layout(prompt: str) -> str:
     """Migrate existing content into the editable part; leave fixed content empty."""
     if _is_split(prompt):
-        _split_bounds(prompt)
-        return prompt
+        begin, end, _, _ = _split_bounds(prompt)
+        body = prompt[begin:end]
+        body = body.replace("## 性格和人设（包括昵称）\n", "## 性格和人设\n")
+        body = body.replace("## 输出偏好要求\n", "## 回复偏好\n")
+        if "nicknames" not in _section_spans(body):
+            body = body.rstrip() + (
+                "\n\n## 昵称\n<!-- self_prompt:nicknames -->\n\n"
+                "<!-- /self_prompt:nicknames -->\n\n"
+            )
+        return prompt[:begin] + body + prompt[end:]
     sections = _legacy_sections(prompt)
     parts = [
         "# 你维护的固定设定",
@@ -114,7 +125,7 @@ def read_sections(prompt: str) -> dict[str, str]:
     if not _is_split(prompt):
         return _legacy_sections(prompt)
     begin, end, _, _ = _split_bounds(prompt)
-    return {
+    return {key: "" for key in SECTIONS} | {
         key: match.group(1) for key, match in _section_spans(prompt[begin:end]).items()
     }
 
