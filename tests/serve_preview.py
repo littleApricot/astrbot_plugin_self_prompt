@@ -1,6 +1,7 @@
 """Serve an isolated UI harness backed by the real plugin API and SQLite."""
 
 import asyncio
+import json
 import socket
 from pathlib import Path
 
@@ -12,6 +13,14 @@ from .support import Sandbox, app_for
 
 async def main():
     sandbox = await Sandbox().open()
+    sandbox.plugin._data = sandbox.root / "data/plugin_data/astrbot_plugin_self_prompt"
+    sandbox.plugin._data.mkdir(parents=True)
+    gate = (
+        sandbox.plugin._data.parent.parent
+        / "config/astrbot_plugin_reply_gate_config.json"
+    )
+    gate.parent.mkdir(exist_ok=True)
+    gate.write_text(json.dumps({"context_budget": 60000}))
     sandbox.config["auto_memory_message_interval"] = 2
     await sandbox.plugin.collect_history(
         sandbox.message(11, text="这是本次整理的第一条原文。")

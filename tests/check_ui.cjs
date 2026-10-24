@@ -21,6 +21,7 @@ let browser;
   });
   await page.goto(process.argv[2]+'/preview/');
   await page.waitForFunction(()=>document.getElementById('status').textContent==='已载入');
+  assert.match(await page.locator('#stats').textContent(),/判断常驻记忆 \d+ 字节/);
   await page.locator('#character').fill('我是测试机器人，昵称阿蓝。');
   await page.locator('#save-memory').click();
   await page.waitForFunction(()=>document.getElementById('status').textContent==='记忆已保存');

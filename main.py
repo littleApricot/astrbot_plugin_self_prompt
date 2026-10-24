@@ -472,6 +472,7 @@ class SelfPrompt(Star):
         await self._ensure_layout(persona_id)
         after = (await self._manager.get_persona(persona_id)).system_prompt
         rendered = render_current(after)
+        event.set_extra("reply_gate_memory", rendered)
         system = req.system_prompt or ""
         if before and before in system:
             system = system.replace(before, rendered, 1)

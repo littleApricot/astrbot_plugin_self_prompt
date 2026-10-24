@@ -99,6 +99,7 @@ class Dashboard:
                         ("notebook_catalog_max_bytes", 20000),
                     )
                 },
+                "decision_memory_bytes": len(render_current(persona.system_prompt).encode()),
                 "memory_bytes": sum(
                     len(text.encode()) for text in memory["sections"].values()
                 ),

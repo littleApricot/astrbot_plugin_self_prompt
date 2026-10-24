@@ -17,13 +17,13 @@ async function load() {
     state=next;
     $('persona').replaceChildren(...state.personas.map(id=>{const option=node('option',id);option.value=id;return option;}));$('persona').value=state.persona_id;
     $('fixed').value=state.memory.fixed_prompt;$('character').value=state.memory.sections.persona;$('preferences').value=state.memory.sections.output_preferences;
-    $('stats').textContent='常驻资料 '+state.protected_bytes+' 字节 · 可整理记忆 '+state.memory_bytes+' / '+state.settings.long_term_memory_max_bytes+' 字节'+(state.decision_budget?'\n判断总预算 '+state.decision_budget+' 字节（还包含判断指令和请求封装）':'');
+    $('stats').textContent='正式回复常驻资料 '+state.protected_bytes+' 字节 · 可整理记忆 '+state.memory_bytes+' / '+state.settings.long_term_memory_max_bytes+' 字节'+(state.decision_budget?'\n判断总预算 '+state.decision_budget+' 字节（还包含判断指令和请求封装）':'');
     $('budget-actions').replaceChildren();
     if(state.decision_budget){
-      $('stats').textContent+='\n扣除常驻资料后剩余 '+Math.max(0,state.decision_budget-state.protected_bytes)+' 字节，仍需容纳判断指令、请求封装和近期消息。';
+      $('stats').textContent+='\n判断常驻记忆 '+(state.decision_memory_bytes??state.protected_bytes)+' 字节，扣除后剩余 '+Math.max(0,state.decision_budget-(state.decision_memory_bytes??state.protected_bytes))+' 字节，仍需容纳判断指令、请求封装和近期消息。';
       const link=node('a','打开插件页调整回复判断预算');link.href='/#/extension/plugins';link.target='_top';$('budget-actions').append(link);
     }
-    if(state.decision_budget&&state.protected_bytes>=state.decision_budget)$('stats').textContent+='\n常驻资料已超过判断预算，请调整内容或判断预算。';
+    if(state.decision_budget&&(state.decision_memory_bytes??state.protected_bytes)>=state.decision_budget)$('stats').textContent+='\n常驻记忆已超过判断预算，请调整内容或判断预算。';
     $('progress').textContent=state.progress.map(p=>p.origin+'：待整理 '+p.pending+' / '+state.settings.auto_memory_message_interval+' 条').join('；')||'暂时没有待整理消息';
     $('capacity').textContent=state.catalog.page_count+' / '+state.catalog.max_pages+' 页 · 目录 '+state.catalog.catalog_bytes+' 字节';
     $('pages').replaceChildren();
