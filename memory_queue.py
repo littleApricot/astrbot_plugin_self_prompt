@@ -88,17 +88,11 @@ class MemoryQueue:
             ]
 
     def complete(self, scope: str, last_id: int) -> None:
-        """Advance only after success and remove processed message contents."""
+        """Advance after success while preserving sources for owner inspection."""
         with closing(self._connect()) as db, db:
             db.execute(
-                "UPDATE messages SET done=1,payload='{}' WHERE scope=? AND id<=?",
+                "UPDATE messages SET done=1 WHERE scope=? AND id<=? AND done=0",
                 (scope, last_id),
-            )
-            db.execute(
-                "DELETE FROM messages WHERE scope=? AND done=1 AND id NOT IN "
-                "(SELECT id FROM messages WHERE scope=? AND done=1 "
-                "ORDER BY id DESC LIMIT 2000)",
-                (scope, scope),
             )
 
     def pending_count(self) -> int:

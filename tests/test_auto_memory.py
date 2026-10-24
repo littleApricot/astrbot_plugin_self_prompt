@@ -19,7 +19,7 @@ class SummaryFormatTests(unittest.TestCase):
         for chunk in chunks:
             self.assertLessEqual(len(json.dumps(chunk, ensure_ascii=False)), 4000)
 
-    def test_updates_merge_three_sections_and_preserve_original_for_no_change(self):
+    def test_updates_preserve_other_sections_and_original_for_no_change(self):
         original = "Existing persona"
         self.assertEqual(apply_summary(original, '{"updates":{}}'), original)
         updated = apply_summary(
@@ -28,7 +28,7 @@ class SummaryFormatTests(unittest.TestCase):
                 {
                     "updates": {
                         "output_preferences": "Short replies",
-                        "memory": "A fact",
+                        "persona": "New character",
                     }
                 }
             ),
@@ -36,9 +36,9 @@ class SummaryFormatTests(unittest.TestCase):
         self.assertEqual(
             read_sections(updated),
             {
-                "persona": original,
+                "persona": "New character",
                 "output_preferences": "Short replies",
-                "memory": "A fact",
+                "memory": "",
             },
         )
 
@@ -47,7 +47,7 @@ class SummaryFormatTests(unittest.TestCase):
             "[]",
             "{}",
             '{"updates":[]}',
-            '{"updates":{"memory":null}}',
+            '{"updates":{"persona":null}}',
             '{"updates":{"memory":"<!-- self_prompt:v1 -->"}}',
         ]:
             with self.subTest(text=text), self.assertRaises(ValueError):

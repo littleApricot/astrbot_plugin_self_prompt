@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>记忆与记事本</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header><div><h1>记忆与记事本</h1><p>常驻记忆按批整理，记事本由机器人按需读取和维护。</p></div>
+    <label>当前人格 <select id="persona" aria-label="当前人格"></select></label><button id="refresh">刷新</button></header>
+  <p id="status" role="status" aria-live="polite"></p>
+  <nav aria-label="管理内容"><button data-tab="memory" class="active">当前记忆</button><button data-tab="notebook">记事本</button><button data-tab="records">记忆记录</button><button data-tab="settings">配置</button></nav>
+  <section id="memory" class="panel"><div class="stats" id="stats"></div><div id="budget-actions"></div>
+    <label>固定设定<textarea id="fixed" rows="8"></textarea></label>
+    <label>人设、昵称和称呼关系<textarea id="character" rows="6"></textarea></label>
+    <label>长期输出偏好<textarea id="preferences" rows="5"></textarea></label>
+    <button id="save-memory" class="primary">保存记忆</button><p id="progress" class="muted"></p>
+  </section>
+  <section id="notebook" class="panel" hidden><div class="toolbar"><span id="capacity"></span><button id="new-page" class="primary">新建一页</button></div><div id="pages" class="cards"></div></section>
+  <section id="records" class="panel" hidden><p class="muted">每次成功整理均保存全文和原文来源，“无变化”也保留记录。</p><div id="record-list"></div><div class="toolbar"><button id="previous">上一页</button><span id="record-offset"></span><button id="next">下一页</button></div></section>
+  <section id="settings" class="panel" hidden>
+    <label class="check"><input id="auto-enabled" type="checkbox">自动整理常驻记忆</label>
+    <label>每累计多少条新消息整理一次<input id="interval" type="number" min="1"></label>
+    <p class="muted">用户消息和机器人最终回复分别计数；未回复的用户消息也计数。</p>
+    <label>每个人格的记事本页数上限<input id="max-pages" type="number" min="1"></label>
+    <details><summary>高级配置</summary>
+      <label>单次整理超时（秒）<input id="timeout" type="number" min="1"></label>
+      <label>长期记忆字节上限<input id="memory-bytes" type="number" min="1"></label>
+      <label>完整目录字节上限<input id="catalog-bytes" type="number" min="1"></label>
+    </details><button id="save-settings" class="primary">保存配置</button>
+  </section>
+  <dialog id="page-editor"><form method="dialog"><button class="close" aria-label="关闭">关闭</button></form><h2 id="page-heading">记事本页面</h2><p id="page-status" role="status"></p>
+    <label>名称<input id="page-title" maxlength="24"></label><label>描述<input id="page-description" maxlength="60"></label><label>正文<textarea id="page-content" rows="15" maxlength="12000"></textarea></label>
+    <div class="toolbar"><button id="save-page" class="primary">保存页面</button><button id="delete-page" class="danger">删除页面</button></div>
+  </dialog>
+  <dialog id="record-detail"><form method="dialog"><button class="close" aria-label="关闭">关闭</button></form><h2>记忆记录</h2><p id="record-meta"></p><div id="record-memory"></div><h3>本次原文来源</h3><div id="sources"></div>
+    <label class="check"><input id="include-fixed" type="checkbox">同时恢复这条记录中的固定设定</label><button id="restore-memory">将这份记忆恢复为当前内容</button><p id="record-status" role="status"></p>
+  </dialog>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

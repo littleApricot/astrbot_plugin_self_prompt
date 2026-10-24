@@ -1,13 +1,37 @@
 {
   "auto_memory_enabled": {
     "type": "bool",
-    "description": "每累计 100 条聊天消息自动整理记忆",
+    "description": "自动整理常驻记忆",
     "default": true,
     "hint": "每个会话、每个人格分别累计用户发言和机器人最终回复，未回复的用户消息也计数；使用该会话的回复模型。"
+  },
+  "auto_memory_message_interval": {
+    "type": "int",
+    "description": "每累计多少条新消息整理一次",
+    "default": 100,
+    "hint": "用户消息和机器人最终回复分别计数，未回复的消息也计数；各会话、人格分别累计。"
+  },
+  "notebook_max_pages": {
+    "type": "int",
+    "description": "每个人格的记事本页数上限",
+    "default": 100,
+    "hint": "页数达到上限后仍可编辑和删除；降低上限不自动删除已有页面。"
   },
   "auto_memory_timeout": {
     "type": "int",
     "description": "每次记忆整理模型调用超时秒数",
     "default": 60
+  },
+  "long_term_memory_max_bytes": {
+    "type": "int",
+    "description": "可整理长期记忆字节上限",
+    "default": 8000,
+    "hint": "按 UTF-8 字节计算，不包含用户固定设定。超额的已有内容保留，自动更新需要符合预算。"
+  },
+  "notebook_catalog_max_bytes": {
+    "type": "int",
+    "description": "完整记事本目录字节上限",
+    "default": 20000,
+    "hint": "包含名称、描述、页面标识和结构开销。目录完整展示，新增或扩长超过预算时拒绝写入。"
   }
 }

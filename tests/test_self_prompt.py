@@ -1,637 +1,487 @@
-"""Verify section edits, real persona persistence and next-request injection."""
+"""Exercise the new plugin against native persona persistence and request objects."""
 
 import asyncio
+import copy
 import json
-import tempfile
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
-from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Image
 from astrbot.core.astr_main_agent import _ensure_persona_and_skills
-from astrbot.core.db.sqlite import SQLiteDatabase
-from astrbot.core.persona_mgr import PersonaManager
-from astrbot.core.provider.entities import LLMResponse, ProviderRequest
+from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.register import llm_tools
+from astrbot_plugin_self_prompt.core_memory import (
+    current_memory,
+    owner_edit,
+    project_history,
+)
 from astrbot_plugin_self_prompt.main import SelfPrompt
 from astrbot_plugin_self_prompt.prompt_document import (
-    END,
-    FIXED_END,
-    FIXED_START,
-    START,
-    assert_editable_change,
-    ensure_layout,
-    read_fixed,
     read_sections,
     replace_section,
-    revision,
 )
+from astrbot_plugin_self_prompt.tests.support import Sandbox
 
 
-class DocumentTests(unittest.TestCase):
-    def test_legacy_prompt_is_preserved_when_adding_preferences(self):
-        original = "Original persona\n\nNickname: from context\n"
-        prompt = replace_section(original, "output_preferences", "Use short replies.")
-        self.assertEqual(read_sections(prompt)["persona"], original)
-        self.assertEqual(
-            read_sections(prompt)["output_preferences"], "Use short replies."
-        )
-        self.assertEqual(read_sections(prompt)["memory"], "")
-
-    def test_edit_preserves_other_sections_and_external_text(self):
-        prompt = replace_section("Original persona", "memory", "Remember blue cats.")
-        prompt = "Additional instructions\n" + prompt + "\nFooter"
-        updated = replace_section(
-            prompt, "output_preferences", "## Heading\nKeep it brief."
-        )
-        self.assertEqual(read_sections(updated)["persona"], "Original persona")
-        self.assertEqual(read_sections(updated)["memory"], "Remember blue cats.")
-        self.assertTrue(updated.startswith("Additional instructions\n"))
-        self.assertTrue(updated.endswith("\nFooter"))
-        self.assertNotEqual(revision(prompt), revision(updated))
-        cleared = replace_section(updated, "memory", "")
-        self.assertEqual(read_sections(cleared)["memory"], "")
-
-    def test_invalid_document_and_content_fail_without_rebuilding(self):
-        for prompt in [START, END, START + END, START + START + END]:
-            with self.subTest(prompt=prompt), self.assertRaises(ValueError):
-                replace_section(prompt, "memory", "new")
-        with self.assertRaises(ValueError):
-            replace_section("old", "other", "new")
-        with self.assertRaises(ValueError):
-            replace_section("old", "memory", START)
-
-
-class PersonaToolTests(unittest.IsolatedAsyncioTestCase):
+class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="self-prompt-test-")
-        self.root = Path(self.temp.name)
-        self.db = SQLiteDatabase(str(self.root / "personas.db"))
-        self.conf = {
-            "agent_runner": {
-                "runner_type": "local",
-                "config": {"persona": {"persona_id": "default"}},
-            },
-            "provider_settings": {},
-        }
-        self.acm = SimpleNamespace(
-            default_conf=self.conf, get_conf=lambda *args, **kwargs: self.conf
-        )
-        self.manager = PersonaManager(self.db, self.acm)
-        await self.manager.initialize()
-        self.context = SimpleNamespace(
-            persona_manager=self.manager,
-            get_config=lambda *args, **kwargs: self.conf,
-            get_llm_tool_manager=lambda: llm_tools,
-            subagent_orchestrator=None,
-        )
-        self.override = {}
-        self.sp_patch = patch(
-            "astrbot.core.persona_mgr.sp.get_async",
-            AsyncMock(side_effect=lambda **kwargs: self.override),
-        )
-        self.sp_patch.start()
-        with patch(
-            "astrbot_plugin_self_prompt.main.StarTools.get_data_dir",
-            return_value=self.root / "data",
-        ):
-            self.plugin = SelfPrompt(self.context)
-        self.extra = {}
-        self.event = SimpleNamespace(
-            unified_msg_origin="test:GroupMessage:group-1",
-            get_platform_name=lambda: "qq_official",
-            get_extra=lambda key, default=None: self.extra.get(key, default),
-            set_extra=lambda key, value: self.extra.__setitem__(key, value),
-            trace=MagicMock(),
-        )
-        self.req = ProviderRequest(
-            prompt="hello", conversation=SimpleNamespace(persona_id=None)
-        )
-        await self.plugin.prepare_prompt_tools(self.event, self.req)
+        self.s = await Sandbox().open()
+        self.p = self.s.plugin
 
     async def asyncTearDown(self):
-        await self.plugin.terminate()
-        self.sp_patch.stop()
-        await self.db.engine.dispose()
-        self.temp.cleanup()
+        await self.s.close()
 
-    async def test_registered_tools_are_exposed_with_the_three_required_arguments(self):
-        tool = llm_tools.get_func("update_self_prompt")
-        self.assertIsNotNone(tool)
-        self.assertEqual(
-            set(tool.parameters["properties"]),
-            {"section", "content", "expected_revision"},
-        )
-        self.assertEqual(
-            set(tool.parameters["required"]), set(tool.parameters["properties"])
-        )
-        request = ProviderRequest(conversation=SimpleNamespace(persona_id=None))
-        with patch("astrbot.core.astr_main_agent.SkillManager") as skills:
-            skills.return_value.list_skills.return_value = []
-            await _ensure_persona_and_skills(request, {}, self.context, self.event)
-        self.assertIn("get_self_prompt", request.func_tool.names())
-        self.assertIn("update_self_prompt", request.func_tool.names())
-
-    async def test_read_does_not_modify_the_original_persona(self):
-        before = (await self.manager.get_persona("default")).system_prompt
-        result = json.loads(await self.plugin.get_self_prompt(self.event))
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["sections"], read_sections(before))
-        self.assertEqual(result["fixed_prompt"], read_fixed(before))
-        self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt, before
-        )
-        self.assertIn("自维护提示词", self.req.system_prompt)
-
-    async def test_three_sections_persist_and_are_loaded_into_the_next_request(self):
-        existing_backups = len(list((self.root / "data/backups").rglob("*.txt")))
-        expected = {
-            "persona": "My nickname is Echo, and I am calm.",
-            "output_preferences": "Prefer short Chinese replies.",
-            "memory": "The user's cat is named Blue.",
-        }
-        for section, content in expected.items():
-            current = json.loads(await self.plugin.get_self_prompt(self.event))
-            saved = json.loads(
-                await self.plugin.update_self_prompt(
-                    self.event, section, content, current["revision"]
-                )
+    async def test_tools_and_request_have_no_owner_bookkeeping(self):
+        self.assertFalse(hasattr(self.p, "update_self_prompt"))
+        for name in (
+            "get_self_prompt",
+            "notebook_list",
+            "notebook_read",
+            "notebook_create",
+            "notebook_update",
+            "notebook_delete",
+        ):
+            tool = llm_tools.get_func(name)
+            self.assertIsNotNone(tool)
+            wire = json.dumps(
+                {"parameters": tool.parameters, "description": tool.description}
             )
-            self.assertTrue(saved["ok"])
-        fresh = PersonaManager(self.db, self.acm)
-        await fresh.initialize()
-        self.assertEqual(
-            read_sections((await fresh.get_persona("default")).system_prompt), expected
-        )
-        self.context.persona_manager = fresh
-        next_request = ProviderRequest(conversation=SimpleNamespace(persona_id=None))
+            self.assertNotRegex(wire, r"revision|version_id|版本")
+        memory = json.loads(await self.p.get_self_prompt(self.s.event))
+        self.assertEqual(set(memory), {"ok", "fixed_prompt", "sections"})
+        self.assertEqual(set(memory["sections"]), {"persona", "output_preferences"})
+        self.assertNotIn("self_prompt:", self.s.request.system_prompt)
+        self.assertNotIn("版本", self.s.request.system_prompt)
+        req = self.s.request
         with patch("astrbot.core.astr_main_agent.SkillManager") as skills:
             skills.return_value.list_skills.return_value = []
-            await _ensure_persona_and_skills(next_request, {}, self.context, self.event)
-        for content in expected.values():
-            self.assertIn(content, next_request.system_prompt)
-        backups = list((self.root / "data/backups").rglob("*.txt"))
-        self.assertEqual(len(backups), existing_backups + 3)
+            await _ensure_persona_and_skills(req, {}, self.s.context, self.s.event)
+        self.assertIn("notebook_create", req.func_tool.names())
+        self.assertNotIn("update_self_prompt", req.func_tool.names())
 
-    async def test_stale_and_concurrent_edits_do_not_erase_new_information(self):
-        current = json.loads(await self.plugin.get_self_prompt(self.event))
-        results = await asyncio.gather(
-            self.plugin.update_self_prompt(
-                self.event, "memory", "Keep this fact.", current["revision"]
+    async def test_legacy_other_memory_moves_once_without_loss(self):
+        old = replace_section("Nickname Echo", "memory", "原文" * 9000)
+        # Supply a legacy prompt as if it had existed before plugin installation.
+        await self.p._original_update("default", system_prompt=old)
+        await self.p._ensure_layout("default")
+        current = (await self.s.manager.get_persona("default")).system_prompt
+        self.assertEqual(read_sections(current)["memory"], "")
+        pages = self.p.store.catalog("default", self.p.settings())["pages"]
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(
+            "".join(
+                self.p.store.page("default", row["page_id"])["content"] for row in pages
             ),
-            self.plugin.update_self_prompt(
-                self.event, "output_preferences", "Be brief.", current["revision"]
-            ),
+            "原文" * 9000,
         )
-        results = [json.loads(result) for result in results]
-        self.assertEqual(sum(bool(result["ok"]) for result in results), 1)
-        self.assertIn("revision_conflict", [result.get("error") for result in results])
-        latest = json.loads(await self.plugin.get_self_prompt(self.event))
-        self.assertEqual(latest["sections"]["memory"], "Keep this fact.")
+        await self.p._ensure_layout("default")
+        self.assertEqual(
+            len(self.p.store.catalog("default", self.p.settings())["pages"]), 2
+        )
+        request = await self.s.prepare(self.s.message(2))
+        self.assertNotIn("原文原文", request.system_prompt)
+        self.assertIn("迁移记忆", request.extra_user_content_parts[0]["text"])
 
-    async def test_selected_persona_and_existing_tool_settings_are_preserved(self):
-        await self.manager.create_persona("other", "Different persona")
-        await self.manager.update_persona("other", tools=["get_self_prompt"], skills=[])
-        self.override = {"persona_id": "other"}
-        await self.plugin.prepare_prompt_tools(self.event, self.req)
-        current = json.loads(await self.plugin.get_self_prompt(self.event))
-        self.assertEqual(current["persona_id"], "other")
+    async def test_failed_migration_preserves_entire_original(self):
+        self.s.config["notebook_max_pages"] = 1
+        old = replace_section("Core", "memory", "x" * 13000)
+        await self.p._original_update("default", system_prompt=old)
+        with self.assertRaisesRegex(ValueError, "notebook_full"):
+            await self.p._ensure_layout("default")
+        self.assertEqual(
+            (await self.s.manager.get_persona("default")).system_prompt, old
+        )
+        self.assertEqual(
+            self.p.store.catalog("default", self.p.settings())["page_count"], 0
+        )
+
+    async def test_only_directory_is_injected_and_reply_history_kept(self):
         saved = json.loads(
-            await self.plugin.update_self_prompt(
-                self.event, "memory", "Other memory", current["revision"]
+            await self.p.notebook_create(
+                self.s.event, "流程", "处理故障时读取", "private page body"
             )
         )
-        self.assertTrue(saved["ok"])
-        other = await self.manager.get_persona("other")
-        self.assertEqual(other.tools, ["get_self_prompt"])
-        self.assertEqual(other.skills, [])
-        self.assertNotIn(
-            "Other memory", (await self.manager.get_persona("default")).system_prompt
+        event = self.s.message(2)
+        req = await self.s.prepare(event)
+        req.contexts = [{"role": "user", "content": "old full reply context"}]
+        await self.p.prepare_prompt_tools(event, req)
+        self.assertIn("流程", req.extra_user_content_parts[0]["text"])
+        self.assertNotIn("private page body", str(req.extra_user_content_parts))
+        self.assertEqual(len(req.extra_user_content_parts), 1)
+        self.assertEqual(
+            req.contexts, [{"role": "user", "content": "old full reply context"}]
+        )
+        self.assertTrue(req.extra_user_content_parts[0]["_no_save"])
+        data = json.loads(await self.p.notebook_read(event, saved["page_id"]))
+        self.assertEqual(data["content"], "private page body")
+
+    async def test_tools_read_update_delete_and_concurrent_editor(self):
+        created = json.loads(
+            await self.p.notebook_create(
+                self.s.event, "Facts", "Facts for Alice", "Initial fact"
+            )
+        )
+        page_id = created["page_id"]
+        other = self.s.message(2)
+        await self.s.prepare(other)
+        result = json.loads(
+            await self.p.notebook_update(other, page_id, content="No read")
+        )
+        self.assertEqual(result["error"], "read_page_first")
+        await self.p.notebook_read(other, page_id)
+        await self.p.notebook_update(self.s.event, page_id, content="New fact")
+        result = json.loads(
+            await self.p.notebook_update(other, page_id, content="Stale fact")
+        )
+        self.assertEqual(result["error"], "page_changed")
+        await self.p.notebook_read(other, page_id)
+        self.assertTrue(json.loads(await self.p.notebook_delete(other, page_id))["ok"])
+        self.assertEqual(
+            self.p.store.catalog("default", self.p.settings())["page_count"], 0
+        )
+        self.assertEqual(
+            json.loads(await self.p.notebook_read(other, page_id))["error"],
+            "page_not_found",
         )
 
-    async def test_disabled_persona_and_invalid_document_do_not_write(self):
-        self.extra.clear()
-        self.req.conversation.persona_id = "[%None]"
-        await self.plugin.prepare_prompt_tools(self.event, self.req)
-        self.assertFalse(
-            json.loads(await self.plugin.get_self_prompt(self.event))["ok"]
+    async def test_pagination_requires_whole_page_before_replacement(self):
+        page = json.loads(
+            await self.p.notebook_create(
+                self.s.event, "Long", "Long procedure", "x" * 8001
+            )
         )
-        self.assertFalse(
+        event = self.s.message(2)
+        await self.s.prepare(event)
+        await self.p.notebook_read(event, page["page_id"])
+        self.assertEqual(
             json.loads(
-                await self.plugin.update_self_prompt(
-                    self.event, "memory", "new", "anything"
-                )
+                await self.p.notebook_update(event, page["page_id"], content="new")
+            )["error"],
+            "read_page_first",
+        )
+        await self.p.notebook_read(event, page["page_id"], 4000)
+        await self.p.notebook_read(event, page["page_id"], 8000)
+        self.assertTrue(
+            json.loads(
+                await self.p.notebook_update(event, page["page_id"], content="complete")
             )["ok"]
         )
-        self.extra["self_prompt_persona_id"] = "default"
-        await self.manager.update_persona("default", system_prompt=START)
-        result = json.loads(
-            await self.plugin.update_self_prompt(
-                self.event, "memory", "new", revision(START)
-            )
-        )
-        self.assertFalse(result["ok"])
+        self.assertNotIn("revision", await self.p.notebook_list(event))
+
+    async def collect(self, count, start=0, origin="test:GroupMessage:room"):
+        for number in range(start, start + count):
+            await self.p.collect_history(self.s.message(number, origin=origin))
+
+    async def test_configurable_batch_updates_and_preserves_sources(self):
+        self.s.config["auto_memory_message_interval"] = 3
+        self.s.provider.text = '{"updates":{"persona":"Nickname Echo"}}'
+        await self.collect(2)
+        await self.p._process_ready()
+        self.assertEqual(len(self.s.provider.calls), 0)
+        await self.collect(1, 2)
+        await self.p._process_ready()
+        self.assertEqual(len(self.s.provider.calls), 1)
+        self.assertEqual(self.p.store.pending_count(), 0)
+        rows = self.p.store.records("default")
+        automatic = next(row for row in rows if row["kind"] == "automatic")
+        record = self.p.store.record("default", automatic["id"])
+        self.assertTrue(record["changed"])
         self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt, START
+            [row["text"] for row in record["sources"]],
+            ["message 0", "message 1", "message 2"],
+        )
+        self.assertEqual(
+            read_sections((await self.s.manager.get_persona("default")).system_prompt)[
+                "persona"
+            ],
+            "Nickname Echo",
+        )
+        payload = self.s.provider.calls[0]
+        self.assertNotIn("revision", payload["prompt"])
+        self.assertNotIn("版本", payload["system_prompt"])
+        with self.p.store._connect() as db:
+            rows = db.execute("SELECT payload FROM messages WHERE done=1").fetchall()
+            self.assertEqual(len(rows), 3)
+            self.assertTrue(all(row[0] != "{}" for row in rows))
+
+    async def test_unchanged_batch_has_its_own_sources_and_log(self):
+        self.s.config["auto_memory_message_interval"] = 2
+        before = (await self.s.manager.get_persona("default")).system_prompt
+        await self.collect(2)
+        await self.p._process_ready()
+        await self.collect(2, 2)
+        await self.p._process_ready()
+        records = [
+            self.p.store.record("default", row["id"])
+            for row in self.p.store.records("default")
+            if row["kind"] == "automatic"
+        ]
+        self.assertEqual(len(records), 2)
+        self.assertTrue(
+            all(not row["changed"] and row["state"] == "committed" for row in records)
+        )
+        self.assertEqual(
+            [source["text"] for source in records[0]["sources"]],
+            ["message 2", "message 3"],
+        )
+        self.assertEqual(
+            (await self.s.manager.get_persona("default")).system_prompt, before
         )
 
-    def auto_context(self, result='{"updates": {}}'):
-        provider = SimpleNamespace(
-            text_chat=AsyncMock(
-                return_value=LLMResponse("assistant", completion_text=result)
-            )
+    async def test_unchanged_over_budget_memory_still_records_sources(self):
+        current = (await self.s.manager.get_persona("default")).system_prompt
+        await self.s.manager.update_persona(
+            "default", system_prompt=replace_section(current, "persona", "x" * 8100)
         )
-        self.context.conversation_manager = SimpleNamespace(
-            get_curr_conversation_id=AsyncMock(return_value=None),
+        self.s.config["auto_memory_message_interval"] = 1
+        await self.collect(1)
+        await self.p._process_ready()
+        self.assertEqual(self.p.store.pending_count(), 0)
+        row = next(
+            row for row in self.p.store.records("default") if row["kind"] == "automatic"
         )
-        self.context.get_using_provider_async = AsyncMock(return_value=provider)
-        self.context.get_provider_by_id = MagicMock(return_value=provider)
-        return provider
+        self.assertFalse(row["changed"])
+        self.assertEqual(row["state"], "committed")
 
-    def message_event(self, number, origin="test:GroupMessage:group-1", text=None):
-        extras = {}
-        return SimpleNamespace(
-            unified_msg_origin=origin,
-            message_obj=SimpleNamespace(message_id=str(number)),
-            get_platform_name=lambda: "qq_official",
-            get_sender_id=lambda: "user-1",
-            get_self_id=lambda: "bot-1",
-            get_sender_name=lambda: "Alice",
-            get_message_outline=lambda: text or f"history message {number}",
-            get_extra=lambda key, default=None: extras.get(key, default),
-            set_extra=lambda key, value: extras.__setitem__(key, value),
-        )
+    async def test_background_worker_processes_wakeup(self):
+        self.s.config["auto_memory_message_interval"] = 1
+        await self.collect(1)
+        SelfPrompt._start_worker(self.p)
 
-    async def wait_pending(self, expected):
         async def wait():
-            while self.plugin.memory_queue.pending_count() != expected:
+            while self.p.store.pending_count():
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait(), timeout=3)
+        await asyncio.wait_for(wait(), 2)
+        self.assertEqual(len(self.s.provider.calls), 1)
 
-    async def test_100_messages_trigger_background_save_and_next_request_load(self):
-        provider = self.auto_context(
-            '{"updates": {"memory": "Alice likes blue cats."}}'
+    async def test_create_after_delete_and_after_change_is_not_stale_cached_success(
+        self,
+    ):
+        original = json.loads(
+            await self.p.notebook_create(self.s.event, "A", "purpose", "one")
         )
-        self.req.contexts = [{"role": "user", "content": "Keep normal history"}]
-        for number in range(99):
-            await self.plugin.collect_history(self.message_event(number))
-        await asyncio.sleep(0.02)
-        provider.text_chat.assert_not_awaited()
-        await self.plugin.collect_history(self.message_event(99))
-        await self.wait_pending(0)
-        provider.text_chat.assert_awaited_once()
-        call = provider.text_chat.call_args.kwargs
-        history = json.loads(call["prompt"])["history"]
-        self.assertEqual(len(history), 100)
-        self.assertEqual(history[0]["text"], "history message 0")
-        self.assertEqual(history[-1]["text"], "history message 99")
-        self.assertIsNone(call["func_tool"])
-        self.assertEqual(call["contexts"], [])
-        self.assertEqual(self.req.contexts[0]["content"], "Keep normal history")
-        fresh = PersonaManager(self.db, self.acm)
-        await fresh.initialize()
-        self.context.persona_manager = fresh
-        request = ProviderRequest(conversation=SimpleNamespace(persona_id=None))
-        with patch("astrbot.core.astr_main_agent.SkillManager") as skills:
-            skills.return_value.list_skills.return_value = []
-            await _ensure_persona_and_skills(request, {}, self.context, self.event)
-        self.assertIn("Alice likes blue cats.", request.system_prompt)
+        await self.p.notebook_delete(self.s.event, original["page_id"])
+        second = json.loads(
+            await self.p.notebook_create(self.s.event, "A", "purpose", "one")
+        )
+        self.assertNotEqual(original["page_id"], second["page_id"])
+        await self.p.notebook_update(self.s.event, second["page_id"], content="two")
+        third = json.loads(
+            await self.p.notebook_create(self.s.event, "A", "purpose", "one")
+        )
+        self.assertNotEqual(second["page_id"], third["page_id"])
 
-    async def test_final_replies_count_once_but_tools_and_chunks_do_not(self):
-        provider = self.auto_context()
-        for number in range(50):
-            event = self.message_event(number)
-            await self.plugin.collect_history(event)
-            await self.plugin.collect_history(event)
-            await self.plugin.collect_reply(
+    async def test_projection_archives_original_fields_once(self):
+        req = self.s.request
+        req.contexts = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c",
+                        "function": {
+                            "name": "update_self_prompt",
+                            "arguments": '{"expected_revision":"old"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c",
+                "content": '{"revision":"old","ok":true}',
+            },
+        ]
+        before = copy.deepcopy(req.contexts)
+        await self.p.prepare_prompt_tools(self.s.event, req)
+        await self.p.prepare_prompt_tools(self.s.event, req)
+        self.assertNotIn("revision", json.dumps(req.contexts))
+        with self.p.store._connect() as db:
+            saved = [
+                json.loads(row[0])
+                for row in db.execute(
+                    "SELECT message FROM original_tool_messages ORDER BY rowid"
+                )
+            ]
+        self.assertEqual(saved, before)
+
+    async def test_native_editor_preserves_other_persona_fields(self):
+        await self.s.manager.update_persona(
+            "default", tools=["get_self_prompt"], skills=[], begin_dialogs=["hello"]
+        )
+        prompt = (await self.s.manager.get_persona("default")).system_prompt
+        await self.s.manager.update_persona(
+            "default", system_prompt=replace_section(prompt, "persona", "Name")
+        )
+        saved = await self.s.manager.get_persona("default")
+        self.assertEqual(saved.tools, ["get_self_prompt"])
+        self.assertEqual(saved.skills, [])
+        self.assertEqual(saved.begin_dialogs, ["hello"])
+
+    async def test_external_content_change_is_not_reported_as_unchanged(self):
+        current = (await self.s.manager.get_persona("default")).system_prompt
+        await self.p._original_update(
+            "default",
+            system_prompt=replace_section(current, "persona", "External edit"),
+        )
+        await self.p._ensure_layout("default")
+        row = self.p.store.records("default")[0]
+        self.assertEqual(row["kind"], "external")
+        self.assertTrue(row["changed"])
+
+    async def test_silent_messages_and_completed_replies_count_once(self):
+        self.s.config["auto_memory_message_interval"] = 4
+        for number in range(2):
+            event = self.s.message(number)
+            await self.p.collect_history(event)
+            await self.p.collect_history(event)
+            response = LLMResponse("assistant", completion_text="final")
+            await self.p.collect_reply(
                 event,
-                LLMResponse(
-                    "assistant",
-                    completion_text="tool plan",
-                    tools_call_name=["search"],
-                ),
+                LLMResponse("assistant", completion_text="plan", tools_call_name=["x"]),
             )
-            chunk = LLMResponse("assistant", completion_text="partial")
-            chunk.is_chunk = True
-            await self.plugin.collect_reply(event, chunk)
-            reply = LLMResponse("assistant", completion_text=f"reply {number}")
-            await self.plugin.collect_reply(event, reply)
-            await self.plugin.collect_reply(event, reply)
-        await self.wait_pending(0)
-        provider.text_chat.assert_awaited_once()
-        history = json.loads(provider.text_chat.call_args.kwargs["prompt"])["history"]
-        self.assertEqual(sum(r["role"] == "user" for r in history), 50)
-        self.assertEqual(sum(r["role"] == "assistant" for r in history), 50)
-        # Redelivery after completion does not start another batch.
-        await self.plugin.collect_history(self.message_event(0))
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 0)
+            await self.p.collect_reply(event, response)
+            await self.p.collect_reply(event, response)
+        await self.p._process_ready()
+        self.assertEqual(len(self.s.provider.calls), 1)
+        history = json.loads(self.s.provider.calls[0]["prompt"])["history"]
+        self.assertEqual(
+            [row["role"] for row in history], ["user", "assistant", "user", "assistant"]
+        )
+        await self.p.collect_history(self.s.message(0))
+        self.assertEqual(self.p.store.pending_count(), 0)
 
-    async def test_pending_and_completed_batches_survive_plugin_restart(self):
-        provider = self.auto_context()
-        for number in range(99):
-            await self.plugin.collect_history(self.message_event(number))
-        await self.plugin.terminate()
+    async def test_manual_save_during_consolidation_wins(self):
+        self.s.config["auto_memory_message_interval"] = 1
+
+        async def intervene(**kwargs):
+            original = (await self.s.manager.get_persona("default")).system_prompt
+            updated = replace_section(original, "persona", "Owner says this")
+            await self.s.manager.update_persona("default", system_prompt=updated)
+            return LLMResponse(
+                "assistant", completion_text='{"updates":{"persona":"Stale result"}}'
+            )
+
+        self.s.provider.text = intervene
+        await self.collect(1)
+        await self.p._process_ready()
+        self.assertEqual(
+            read_sections((await self.s.manager.get_persona("default")).system_prompt)[
+                "persona"
+            ],
+            "Owner says this",
+        )
+        self.assertEqual(self.p.store.pending_count(), 1)
+        self.assertTrue(
+            any(row["state"] == "failed" for row in self.p.store.records("default"))
+        )
+
+    async def test_disallowed_or_oversized_update_cannot_advance_queue(self):
+        self.s.config["auto_memory_message_interval"] = 1
+        original = (await self.s.manager.get_persona("default")).system_prompt
+        await self.collect(1)
+        for text in (
+            '{"updates":{"memory":"not allowed"}}',
+            json.dumps({"updates": {"persona": "x" * 8001}}),
+        ):
+            self.s.provider.text = text
+            self.p._retry_after.clear()
+            await self.p._process_ready()
+            self.assertEqual(self.p.store.pending_count(), 1)
+            self.assertEqual(
+                (await self.s.manager.get_persona("default")).system_prompt, original
+            )
+
+    async def test_native_editor_saves_each_snapshot_and_keeps_fixed(self):
+        original = (await self.s.manager.get_persona("default")).system_prompt
+        first = owner_edit(
+            original,
+            "Exact fixed  \n",
+            {"persona": "First", "output_preferences": "Short"},
+        )
+        await self.s.manager.update_persona("default", system_prompt=first)
+        second = replace_section(first, "persona", "Second")
+        await self.s.manager.update_persona("default", system_prompt=second)
+        manual = [
+            self.p.store.record("default", row["id"])
+            for row in self.p.store.records("default")
+            if row["kind"] == "manual"
+        ]
+        self.assertEqual(
+            [
+                current_memory(row["content"])["sections"]["persona"]
+                for row in manual[:2]
+            ],
+            ["Second", "First"],
+        )
+        self.assertEqual(current_memory(second)["fixed_prompt"], "Exact fixed  \n")
+        self.assertTrue(all(row["sources"] == [] for row in manual))
+
+    async def test_prepared_write_recovers_and_acknowledges_exact_batch(self):
+        self.s.config["auto_memory_message_interval"] = 2
+        await self.collect(3)
+        original = (await self.s.manager.get_persona("default")).system_prompt
+        target = replace_section(original, "persona", "Recovered")
+        scope = self.p.store.ready(2)[0]
+        records = self.p.store.batch(scope["id"], 2)
+        record_id = self.p.store.stage(
+            "default",
+            original,
+            target,
+            "automatic",
+            records,
+            scope["id"],
+            records[-1]["id"],
+        )
+        await self.p._original_update("default", system_prompt=target)
+        await self.p._recover("default")
+        await self.p._recover("default")
+        self.assertEqual(self.p.store.pending_count(), 1)
+        self.assertEqual(
+            self.p.store.record("default", record_id)["state"], "committed"
+        )
+
+    async def test_legacy_history_projection_preserves_original_and_other_tools(self):
+        content = json.dumps(
+            {
+                "ok": True,
+                "revision": "private-hash",
+                "sections": {"persona": "Keep this"},
+            }
+        )
+        history = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c",
+                        "function": {"name": "get_self_prompt", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c",
+                "content": [{"type": "text", "text": content}],
+            },
+            {"role": "tool", "tool_call_id": "other", "content": content},
+        ]
+        before = copy.deepcopy(history)
+        projected = project_history(history)
+        self.assertNotIn("private-hash", projected[1]["content"][0]["text"])
+        self.assertIn("Keep this", projected[1]["content"][0]["text"])
+        self.assertEqual(projected[2], history[2])
+        self.assertEqual(history, before)
+
+    async def test_reload_restores_editor_hook_and_preserves_pending(self):
+        await self.collect(1)
+        await self.p.terminate()
+        self.assertIs(self.s.manager.update_persona, self.p._original_update)
         with patch(
             "astrbot_plugin_self_prompt.main.StarTools.get_data_dir",
-            return_value=self.root / "data",
+            return_value=self.s.data,
         ):
-            self.plugin = SelfPrompt(self.context)
-        await self.plugin.initialize()
-        await self.plugin.collect_history(self.message_event(99))
-        await self.wait_pending(0)
-        self.assertEqual(provider.text_chat.await_count, 1)
-        await self.plugin.terminate()
-        with patch(
-            "astrbot_plugin_self_prompt.main.StarTools.get_data_dir",
-            return_value=self.root / "data",
-        ):
-            self.plugin = SelfPrompt(self.context)
-        await self.plugin.initialize()
-        await asyncio.sleep(0.02)
-        self.assertEqual(provider.text_chat.await_count, 1)
-        await self.plugin.collect_history(self.message_event(100))
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 1)
-
-    async def test_separate_sessions_and_personas_do_not_mix_their_counts(self):
-        provider = self.auto_context()
-        for number in range(60):
-            await self.plugin.collect_history(
-                self.message_event(number, origin="group-a")
-            )
-            await self.plugin.collect_history(
-                self.message_event(number, origin="group-b")
-            )
-        await self.manager.create_persona("other", "Other persona")
-        self.override = {"persona_id": "other"}
-        for number in range(60, 99):
-            await self.plugin.collect_history(
-                self.message_event(number, origin="group-a")
-            )
-        await asyncio.sleep(0.02)
-        provider.text_chat.assert_not_awaited()
-        self.assertEqual(len(self.plugin.memory_queue.ready(100)), 0)
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 159)
-
-    async def test_failure_keeps_batch_and_later_retry_processes_exactly_100(self):
-        provider = self.auto_context()
-        provider.text_chat.side_effect = RuntimeError("simulated failure")
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(101):
-                await self.plugin.collect_history(self.message_event(number))
-        await self.plugin._process_ready()
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 101)
-        provider.text_chat.side_effect = None
-        self.plugin._retry_after.clear()
-        await self.plugin._process_ready()
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 1)
-        self.assertEqual(provider.text_chat.await_count, 2)
-
-    async def test_manual_edits_during_summary_are_preserved_and_batch_is_not_acked(
-        self,
-    ):
-        provider = self.auto_context()
-
-        async def edit_while_running(**kwargs):
-            await self.manager.update_persona(
-                "default", system_prompt="Manually updated"
-            )
-            return LLMResponse(
-                "assistant", completion_text='{"updates":{"memory":"stale"}}'
-            )
-
-        provider.text_chat.side_effect = edit_while_running
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(100):
-                await self.plugin.collect_history(self.message_event(number))
-        await self.plugin._process_ready()
-        self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt,
-            "Manually updated",
-        )
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 100)
-
-    async def test_invalid_result_cannot_erase_prompt_or_advance_progress(self):
-        self.auto_context('{"updates":{"unknown":"bad"}}')
-        original = (await self.manager.get_persona("default")).system_prompt
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(100):
-                await self.plugin.collect_history(self.message_event(number))
-        await self.plugin._process_ready()
-        self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt, original
-        )
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 100)
-
-    async def test_disabled_auto_memory_keeps_manual_tools_available(self):
-        provider = self.auto_context()
-        self.plugin.config["auto_memory_enabled"] = False
-        await self.plugin.collect_history(self.message_event(0))
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 0)
-        current = json.loads(await self.plugin.get_self_prompt(self.event))
-        result = json.loads(
-            await self.plugin.update_self_prompt(
-                self.event,
-                "memory",
-                "Still editable",
-                current["revision"],
-            )
-        )
-        self.assertTrue(result["ok"])
-        provider.text_chat.assert_not_awaited()
-
-    async def test_media_only_messages_count_without_sending_image_data_to_summary(
-        self,
-    ):
-        provider = self.auto_context()
-        for number in range(50):
-            event = self.message_event(number, text="[图片]")
-            await self.plugin.collect_history(event)
-            await self.plugin.collect_reply(
-                event,
-                LLMResponse(
-                    "assistant",
-                    result_chain=MessageChain([Image(file="private-image.png")]),
-                ),
-            )
-        await self.wait_pending(0)
-        provider.text_chat.assert_awaited_once()
-        prompt = provider.text_chat.call_args.kwargs["prompt"]
-        self.assertNotIn("private-image.png", prompt)
-        self.assertEqual(len(json.loads(prompt)["history"]), 100)
-
-    async def test_oversized_batch_uses_multiple_calls_without_losing_old_or_new_text(
-        self,
-    ):
-        provider = self.auto_context()
-        expected = []
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(100):
-                text = ("long fact " * 8000) if number == 40 else f"message {number}"
-                expected.append(text)
-                await self.plugin.collect_history(self.message_event(number, text=text))
-        with patch("astrbot_plugin_self_prompt.main.INPUT_CHAR_LIMIT", 8000):
-            await self.plugin._process_ready()
-        self.assertGreater(provider.text_chat.await_count, 1)
-        actual = "".join(
-            row["text"]
-            for call in provider.text_chat.call_args_list
-            for row in json.loads(call.kwargs["prompt"])["history"]
-        )
-        self.assertEqual(actual, "".join(expected))
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 0)
-
-    async def set_fixed(self, content):
-        persona = await self.manager.get_persona("default")
-        prompt = ensure_layout(persona.system_prompt)
-        old = read_fixed(prompt)
-        prompt = prompt.replace(
-            FIXED_START + "\n" + old + "\n" + FIXED_END,
-            FIXED_START + "\n" + content + "\n" + FIXED_END,
-        )
-        await self.manager.update_persona("default", system_prompt=prompt)
-        return prompt
-
-    async def test_tools_only_update_editable_parts_and_fixed_survives_reload(self):
-        fixed = "Only the owner changes this.\nKeep exact whitespace.  \n"
-        original = await self.set_fixed(fixed)
-        for section in ("persona", "output_preferences", "memory"):
-            current = json.loads(await self.plugin.get_self_prompt(self.event))
-            self.assertEqual(current["fixed_prompt"], fixed)
-            result = json.loads(
-                await self.plugin.update_self_prompt(
-                    self.event,
-                    section,
-                    f"New {section}",
-                    current["revision"],
-                )
-            )
-            self.assertTrue(result["ok"])
-        fresh = PersonaManager(self.db, self.acm)
-        await fresh.initialize()
-        updated = (await fresh.get_persona("default")).system_prompt
-        assert_editable_change(original, updated)
-        self.assertEqual(read_fixed(updated), fixed)
-        self.context.persona_manager = fresh
-        request = ProviderRequest(conversation=SimpleNamespace(persona_id=None))
-        with patch("astrbot.core.astr_main_agent.SkillManager") as skills:
-            skills.return_value.list_skills.return_value = []
-            await _ensure_persona_and_skills(request, {}, self.context, self.event)
-        self.assertIn(fixed, request.system_prompt)
-        self.assertIn("New memory", request.system_prompt)
-
-    async def test_tool_rejects_fixed_targets_marker_injection_and_stale_fixed_edits(
-        self,
-    ):
-        await self.set_fixed("Owner rule")
-        current = json.loads(await self.plugin.get_self_prompt(self.event))
-        for section in ("fixed_prompt", "fixed"):
-            result = json.loads(
-                await self.plugin.update_self_prompt(
-                    self.event,
-                    section,
-                    "replace owner rule",
-                    current["revision"],
-                )
-            )
-            self.assertFalse(result["ok"])
-        result = json.loads(
-            await self.plugin.update_self_prompt(
-                self.event,
-                "memory",
-                FIXED_END + "replace owner rule",
-                current["revision"],
-            )
-        )
-        self.assertFalse(result["ok"])
-        await self.set_fixed("New owner rule")
-        result = json.loads(
-            await self.plugin.update_self_prompt(
-                self.event,
-                "memory",
-                "stale",
-                current["revision"],
-            )
-        )
-        self.assertEqual(result["error"], "revision_conflict")
-        self.assertEqual(
-            read_fixed((await self.manager.get_persona("default")).system_prompt),
-            "New owner rule",
-        )
-
-    async def test_persistence_boundary_rejects_direct_fixed_changes(self):
-        original = await self.set_fixed("Owner rule")
-        tampered = original.replace("Owner rule", "Replaced rule")
-        with self.assertRaisesRegex(ValueError, "fixed_prompt_modified"):
-            await self.plugin._persist("default", original, tampered)
-        self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt, original
-        )
-
-    async def test_automatic_summary_sees_fixed_as_readonly_and_preserves_it(self):
-        original = await self.set_fixed("Owner's fixed instruction")
-        provider = self.auto_context('{"updates":{"memory":"New learned fact"}}')
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(100):
-                await self.plugin.collect_history(self.message_event(number))
-        await self.plugin._process_ready()
-        payload = json.loads(provider.text_chat.call_args.kwargs["prompt"])
-        self.assertEqual(payload["fixed_prompt"], "Owner's fixed instruction")
-        updated = (await self.manager.get_persona("default")).system_prompt
-        assert_editable_change(original, updated)
-        self.assertEqual(read_sections(updated)["memory"], "New learned fact")
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 0)
-
-    async def test_automatic_summary_cannot_return_a_fixed_prompt_update(self):
-        original = await self.set_fixed("Owner rule")
-        self.auto_context('{"updates":{"fixed_prompt":"tampered"}}')
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(100):
-                await self.plugin.collect_history(self.message_event(number))
-        await self.plugin._process_ready()
-        self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt, original
-        )
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 100)
-
-    async def test_manual_fixed_edit_during_summary_keeps_the_batch_for_retry(self):
-        await self.set_fixed("Owner rule before")
-        provider = self.auto_context()
-
-        async def edit_while_running(**kwargs):
-            await self.set_fixed("Owner rule after")
-            return LLMResponse(
-                "assistant", completion_text='{"updates":{"memory":"stale"}}'
-            )
-
-        provider.text_chat.side_effect = edit_while_running
-        with patch.object(self.plugin, "_start_worker"):
-            for number in range(100):
-                await self.plugin.collect_history(self.message_event(number))
-        await self.plugin._process_ready()
-        prompt = (await self.manager.get_persona("default")).system_prompt
-        self.assertEqual(read_fixed(prompt), "Owner rule after")
-        self.assertNotIn("stale", read_sections(prompt)["memory"])
-        self.assertEqual(self.plugin.memory_queue.pending_count(), 100)
-
-    async def test_startup_migrates_existing_personas_to_editable_with_backups(self):
-        plain = "Existing persona and manually written instructions\n"
-        await self.manager.update_persona("default", system_prompt=plain)
-        await self.manager.create_persona("other", "Another existing persona")
-        await self.plugin.initialize()
-        for persona_id, expected in [
-            ("default", plain),
-            ("other", "Another existing persona"),
-        ]:
-            prompt = (await self.manager.get_persona(persona_id)).system_prompt
-            self.assertEqual(read_fixed(prompt), "")
-            self.assertEqual(read_sections(prompt)["persona"], expected)
-        backups = [p.read_text() for p in (self.root / "data/backups").rglob("*.txt")]
-        self.assertIn(plain, backups)
-        first = (await self.manager.get_persona("default")).system_prompt
-        await self.plugin.initialize()
-        self.assertEqual(
-            (await self.manager.get_persona("default")).system_prompt, first
-        )
+            other = SelfPrompt(self.s.context, self.s.config)
+        await other._ensure_layout("default")
+        self.assertEqual(other.store.pending_count(), 1)
+        await other.terminate()
