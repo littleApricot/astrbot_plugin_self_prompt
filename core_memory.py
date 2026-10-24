@@ -44,6 +44,7 @@ def render_current(prompt):
         "# 长期记忆\n\n",
         layout,
     )
+    layout = re.sub(r"(?m)^# 你维护的固定设定\s*$", "", layout)
     return MARKERS.sub("", layout).strip()
 
 

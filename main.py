@@ -93,6 +93,42 @@ class SelfPrompt(Star):
     def settings(self):
         return Settings.read(self.config)
 
+    def _lcm_managed(self):
+        lookup = getattr(self.context, "get_registered_star", None)
+        star = lookup("astrbot_plugin_lcm") if callable(lookup) else None
+        plugin = getattr(star, "star_cls", None)
+        return bool(
+            plugin
+            and getattr(star, "activated", True)
+            and getattr(plugin, "config", {}).get("enabled", True)
+            and callable(getattr(plugin, "context_rules", None))
+        )
+
+    def lcm_context_rules(self):
+        def catalog(event):
+            persona_id = event.get_extra("self_prompt_persona_id")
+            return (
+                catalog_text(self.store.catalog(persona_id, self.settings())["pages"])
+                if persona_id
+                else ""
+            )
+
+        return {
+            "owner": "astrbot_plugin_self_prompt",
+            "system": lambda event: event.get_extra("self_prompt_system_text", ""),
+            "temporary": catalog,
+            "history_tools": {
+                "get_self_prompt": "keep",
+                "notebook_read": "keep",
+                "notebook_create": "keep",
+                "notebook_update": "keep",
+                "notebook_delete": "keep",
+            },
+            "history_projector": lambda messages: list(
+                enumerate(project_history(messages))
+            ),
+        }
+
     def _backup(self, persona_id, text):
         folder = self._data / "backups" / digest(persona_id)
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -210,7 +246,7 @@ class SelfPrompt(Star):
                     current_memory(text)
                     self.store.import_backup(persona.persona_id, text, path.name)
             except Exception as exc:
-                self.logger.warning("Memory migration failed: %s", type(exc).__name__)
+                self.logger.warning("记忆迁移失败：%s", type(exc).__name__)
         if self.settings().enabled:
             self._start_worker()
 
@@ -304,7 +340,7 @@ class SelfPrompt(Star):
                     event, persona_id, "user", event.get_message_outline()
                 )
         except Exception as exc:
-            self.logger.warning("Memory history capture failed: %s", type(exc).__name__)
+            self.logger.warning("记忆整理原文收集失败：%s", type(exc).__name__)
 
     @filter.on_llm_response()
     async def collect_reply(self, event: AstrMessageEvent, response: LLMResponse):
@@ -336,7 +372,7 @@ class SelfPrompt(Star):
             try:
                 await self._process_ready()
             except Exception as exc:
-                self.logger.warning("Memory queue failed: %s", type(exc).__name__)
+                self.logger.warning("记忆整理队列处理失败：%s", type(exc).__name__)
 
     async def _process_ready(self):
         while self.settings().enabled:
@@ -350,9 +386,7 @@ class SelfPrompt(Star):
                     progressed = True
                 except Exception as exc:
                     self._retry_after[scope["id"]] = time.monotonic() + 60
-                    self.logger.warning(
-                        "Automatic memory batch failed: %s", type(exc).__name__
-                    )
+                    self.logger.warning("自动记忆整理失败：%s", type(exc).__name__)
             if not progressed:
                 return
 
@@ -385,7 +419,7 @@ class SelfPrompt(Star):
         pending = [inputs]
         try:
             while pending:
-                header = {"origin": scope["origin"], **current_memory(staged)}
+                header = current_memory(staged)
                 overhead = (
                     len(json.dumps(header, ensure_ascii=False))
                     + len(SUMMARY_PROMPT)
@@ -449,8 +483,8 @@ class SelfPrompt(Star):
             self.store.fail(failed, code)
             raise
         self.logger.info(
-            "Automatic memory consolidation completed: outcome=%s messages=%s remaining=%s",
-            "updated" if staged != original else "unchanged",
+            "自动记忆整理完成：结果=%s，消息数=%s，剩余消息数=%s",
+            "已更新" if staged != original else "无变化",
             len(records),
             self.store.pending_count(),
         )
@@ -478,30 +512,34 @@ class SelfPrompt(Star):
         after = (await self._manager.get_persona(persona_id)).system_prompt
         rendered = render_current(after)
         event.set_extra("reply_gate_memory", rendered)
+        event.set_extra("self_prompt_system_text", rendered)
+        managed = self._lcm_managed()
         system = req.system_prompt or ""
         if before and before in system:
-            system = system.replace(before, rendered, 1)
+            system = system.replace(before, "" if managed else rendered, 1)
         elif after and after in system:
-            system = system.replace(after, rendered, 1)
-        elif rendered not in system:
+            system = system.replace(after, "" if managed else rendered, 1)
+        elif not managed and rendered not in system:
             system += "\n\n" + rendered
         req.system_prompt = system
-        projected = project_history(req.contexts)
-        self.store.archive_tool_projection(
-            persona_id, event.unified_msg_origin, req.contexts, projected
-        )
-        req.contexts = projected
+        if not managed:
+            projected = project_history(req.contexts)
+            self.store.archive_tool_projection(
+                persona_id, event.unified_msg_origin, req.contexts, projected
+            )
+            req.contexts = projected
         event.set_extra("self_prompt_persona_id", persona_id)
         event.set_extra("self_prompt_model", req.model)
         if event.get_extra("self_prompt_request") != id(req):
-            catalog = self.store.catalog(persona_id, self.settings())
-            req.extra_user_content_parts.append(
-                {
-                    "type": "text",
-                    "text": catalog_text(catalog["pages"]),
-                    "_no_save": True,
-                }
-            )
+            if not managed:
+                catalog = self.store.catalog(persona_id, self.settings())
+                req.extra_user_content_parts.append(
+                    {
+                        "type": "text",
+                        "text": catalog_text(catalog["pages"]),
+                        "_no_save": True,
+                    }
+                )
             event.set_extra("self_prompt_request", id(req))
             event.set_extra("self_prompt_reads", {})
             event.set_extra("self_prompt_creates", {})
