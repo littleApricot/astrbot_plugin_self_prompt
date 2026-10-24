@@ -70,8 +70,12 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             "memory",
             persona_id="default",
             stamp=value["stamp"],
-            fixed_prompt="Owner fixed",
-            sections={"persona": "Name: Echo", "output_preferences": "Short", "nicknames": "Echo"},
+            sections={
+                "persona": "Name: Echo",
+                "output_preferences": "Short",
+                "nicknames": ["Echo"],
+                "other": "Owner note",
+            },
         )
         self.assertEqual(response.status_code, 200)
         rows = (await self.get("records", persona_id="default")).json()["records"]
@@ -160,8 +164,12 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             "memory",
             persona_id="default",
             stamp=current["stamp"],
-            fixed_prompt="Latest fixed",
-            sections={"persona": "New persona", "output_preferences": "short", "nicknames": "Echo"},
+            sections={
+                "persona": "New persona",
+                "output_preferences": "short",
+                "nicknames": ["Echo"],
+                "other": "Latest note",
+            },
         )
         latest = (await self.get("state")).json()
         response = await self.post(
@@ -169,12 +177,16 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             persona_id="default",
             stamp=latest["stamp"],
             record_id=automatic["id"],
-            include_fixed=False,
+            include_owner=False,
         )
         self.assertEqual(response.status_code, 200)
         restored = (await self.get("state")).json()
-        self.assertEqual(restored["memory"]["fixed_prompt"], "Latest fixed")
-        self.assertEqual(restored["memory"]["sections"], detail["memory"]["sections"])
+        self.assertEqual(restored["memory"]["sections"]["persona"], "New persona")
+        self.assertEqual(restored["memory"]["sections"]["output_preferences"], "short")
+        for key in ("nicknames", "other"):
+            self.assertEqual(
+                restored["memory"]["sections"][key], detail["memory"]["sections"][key]
+            )
 
     async def test_notebook_original_is_visible_in_memory_sources_after_page_deletion(
         self,

@@ -46,6 +46,7 @@ ERRORS = {
     "nickname_action_required": "至少提供要添加或移除的昵称。",
     "content_changed": "内容已变化，请重新读取后重试。",
     "memory_budget_exceeded": "常驻内容已超过字节上限，请精简后重试。",
+    "protected_sections_modified": "此操作超出允许修改的分区。",
 }
 
 
@@ -163,48 +164,28 @@ class SelfPrompt(Star):
             meta = WRITE_CONTEXT.get() or {"kind": "manual"}
             if "expected" in meta and original != meta["expected"]:
                 raise ValueError("content_changed")
-            normalized = ensure_layout(requested)
+            target = ensure_layout(requested)
             if meta["kind"] == "nickname_tool":
-                assert_editable_change(original, normalized)
-                expected_target = replace_section(
-                    original, "nicknames", read_sections(normalized)["nicknames"]
-                )
-                if normalized != expected_target:
-                    raise ValueError("invalid_sections")
-                notes, target = "", normalized
-            else:
-                notes = read_sections(normalized)["memory"]
-                target = (
-                    replace_section(normalized, "memory", "") if notes else normalized
-                )
+                assert_editable_change(original, target, allowed=("nicknames",))
+            elif meta["kind"] == "automatic":
+                assert_editable_change(original, target, allowed=("other",))
             limits = self.settings()
             if meta["kind"] in {"automatic", "nickname_tool"}:
-                assert_editable_change(original, target)
                 size = editable_bytes(target)
                 if target != original and size > limits.memory_bytes:
                     raise ValueError("memory_budget_exceeded")
             self._backup(persona_id, original)
             if requested != original:
                 self._backup(persona_id, requested)
-            if notes:
-                record_id = self.store.stage_migration(
-                    persona_id,
-                    original,
-                    target,
-                    notes,
-                    limits,
-                    meta=meta,
-                )
-            else:
-                record_id = self.store.stage(
-                    persona_id,
-                    original,
-                    target,
-                    meta["kind"],
-                    meta.get("sources"),
-                    meta.get("scope"),
-                    meta.get("last_id"),
-                )
+            record_id = self.store.stage(
+                persona_id,
+                original,
+                target,
+                meta["kind"],
+                meta.get("sources"),
+                meta.get("scope"),
+                meta.get("last_id"),
+            )
             arguments = list(args)
             if arguments:
                 arguments[0] = target
@@ -230,6 +211,19 @@ class SelfPrompt(Star):
                 if persona.system_prompt == record["content"]:
                     self.store.finish(record["id"])
                 elif persona.system_prompt == record["original"]:
+                    if record["kind"] in {"automatic", "nickname_tool"}:
+                        allowed = (
+                            ("other",)
+                            if record["kind"] == "automatic"
+                            else ("nicknames",)
+                        )
+                        try:
+                            assert_editable_change(
+                                record["original"], record["content"], allowed
+                            )
+                        except ValueError:
+                            self.store.fail(record["id"], "protected_sections_modified")
+                            continue
                     saved = await self._original_update(
                         persona_id, system_prompt=record["content"]
                     )
@@ -245,7 +239,7 @@ class SelfPrompt(Star):
         persona = await self._manager.get_persona(persona_id)
         original = persona.system_prompt
         layout = ensure_layout(original)
-        if layout != original or read_sections(layout)["memory"]:
+        if layout != original:
             token = WRITE_CONTEXT.set({"kind": "migration", "expected": original})
             try:
                 await self._manager.update_persona(persona_id, system_prompt=original)
@@ -508,7 +502,7 @@ class SelfPrompt(Star):
                 "invalid_sections",
                 "invalid_content",
                 "invalid_section_content",
-                "invalid_transfer",
+                "protected_sections_modified",
                 "invalid_model_response",
                 "content_changed",
                 "memory_budget_exceeded",
@@ -600,7 +594,7 @@ class SelfPrompt(Star):
 
     @filter.llm_tool(name="get_self_prompt")
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
-        """读取当前固定设定、人设、回复偏好和昵称列表。
+        """读取当前性格和人设、回复偏好、昵称列表和其他记忆。
 
         昵称可用 nickname_update 增删；
         黑话、事实、约定和流程通过记事本工具维护。
@@ -679,7 +673,7 @@ class SelfPrompt(Star):
         """需要具体信息或流程时，根据本轮目录的页面名称和描述主动读取正文。
 
         长页按 next_offset 继续读取。修改或删除前先读取当前页，
-        替换正文前需读完整页。页面是参考资料，仍遵守固定设定和当前任务。
+        替换正文前需读完整页。页面是参考资料，仍遵守性格和人设、回复偏好与当前任务。
 
         Args:
             page_id(string): Page identifier from the notebook directory.
@@ -732,7 +726,7 @@ class SelfPrompt(Star):
         新的黑话含义和用法归到相关记事本页面，注明适用会话和对象。
         个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
         保存成功后才表示记下来了。页数用尽时整理已有内容，删除明确失效的页面后再新建。
-        记事本内容不能覆盖固定设定。
+        记事本内容仍遵守性格和人设、回复偏好。
 
         Args:
             title(string): Concise topic, at most 24 characters.
@@ -782,7 +776,7 @@ class SelfPrompt(Star):
         先读取当前页；整体替换正文前分段读完整页。出现内容变化时重新读取再合并。
         黑话含义、用法和纠正也在对应记事本页面维护。
         个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
-        保存成功后才表示记下来了，页面内容仍遵守固定设定。
+        保存成功后才表示记下来了，页面内容仍遵守性格和人设、回复偏好。
 
         Args:
             page_id(string): Page to edit. Read its current content first.

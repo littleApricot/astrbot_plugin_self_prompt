@@ -1,9 +1,9 @@
 {
   "auto_memory_enabled": {
     "type": "bool",
-    "description": "自动整理常驻记忆",
+    "description": "自动整理其他记忆",
     "default": true,
-    "hint": "每个会话、每个人格分别累计用户发言和机器人最终回复，未回复的用户消息也计数；使用该会话的回复模型。"
+    "hint": "每个会话、每个人格分别累计消息，使用该会话的回复模型，只更新“其他”；性格和人设、回复偏好及昵称列表保持原样。"
   },
   "auto_memory_message_interval": {
     "type": "int",
@@ -24,9 +24,9 @@
   },
   "long_term_memory_max_bytes": {
     "type": "int",
-    "description": "可整理常驻内容字节上限",
+    "description": "昵称和其他内容字节上限",
     "default": 8000,
-    "hint": "按 UTF-8 字节计算，不包含用户固定设定。超额的已有内容保留，自动更新需要符合预算。"
+    "hint": "按 UTF-8 字节统计昵称和其他，不包含性格和人设、回复偏好。超额的已有内容保留，自动总结和昵称工具更新需要符合预算。"
   },
   "notebook_catalog_max_bytes": {
     "type": "int",

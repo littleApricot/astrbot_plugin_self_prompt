@@ -6,23 +6,19 @@ import re
 
 from .nicknames import nickname_text, read_nicknames
 from .prompt_document import (
-    FIXED_END,
-    FIXED_START,
-    START,
+    SECTIONS,
     ensure_layout,
-    read_fixed,
     read_sections,
     replace_section,
 )
 
-CORE_SECTIONS = ("persona", "output_preferences", "nicknames")
+CORE_SECTIONS = tuple(SECTIONS)
 MARKERS = re.compile(r"<!-- /?self_prompt:[^>]*-->")
 
 
 def current_memory(prompt):
     """Return only current owner instructions and long-term memory."""
     return {
-        "fixed_prompt": read_fixed(prompt),
         "sections": {
             key: read_nicknames(value) if key == "nicknames" else value
             for key, value in read_sections(prompt).items()
@@ -35,32 +31,17 @@ def editable_bytes(prompt):
     return sum(
         len(value.encode())
         for key, value in read_sections(ensure_layout(prompt)).items()
-        if key in CORE_SECTIONS
+        if key in {"nicknames", "other"}
     )
 
 
 def render_current(prompt):
-    """Preserve external notes while removing management markup and empty notes."""
-    layout = ensure_layout(prompt)
-    layout = re.sub(
-        r"## 其他需要记住的事情\s*<!-- self_prompt:memory -->.*?<!-- /self_prompt:memory -->",
-        "",
-        layout,
-        flags=re.DOTALL,
-    )
-    layout = re.sub(
-        r"(?m)^# 机器人可维护内容\s*\n+(?=" + re.escape(START) + ")",
-        "",
-        layout,
-    )
-    layout = re.sub(r"(?m)^# 你维护的固定设定\s*$", "", layout)
-    return MARKERS.sub("", layout).strip()
+    """Render the four current sections without storage markup."""
+    return MARKERS.sub("", ensure_layout(prompt)).strip()
 
 
-def owner_edit(prompt, fixed, sections):
+def owner_edit(prompt, sections):
     """Apply a dashboard edit without losing protected surrounding notes."""
-    if not isinstance(fixed, str) or MARKERS.search(fixed):
-        raise ValueError("invalid_content")
     if not isinstance(sections, dict) or set(sections) != set(CORE_SECTIONS):
         raise ValueError("invalid_sections")
     result = ensure_layout(prompt)
@@ -68,9 +49,7 @@ def owner_edit(prompt, fixed, sections):
         if key == "nicknames":
             text = nickname_text(read_nicknames(text))
         result = replace_section(result, key, text)
-    begin = result.index(FIXED_START) + len(FIXED_START)
-    end = result.index(FIXED_END, begin)
-    return result[:begin] + "\n" + fixed + "\n" + result[end:]
+    return result
 
 
 def project_history(history):

@@ -14,6 +14,29 @@ from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_self_prompt.main import SelfPrompt
 
 
+def legacy_prompt(
+    persona="Original persona",
+    preferences="Short",
+    memory="",
+    nicknames="",
+    fixed="Owner notes",
+    include_nicknames=True,
+):
+    """Build a genuine v2 document for future upgrade checks."""
+    values = {"persona": persona, "output_preferences": preferences, "memory": memory}
+    if include_nicknames:
+        values["nicknames"] = (
+            json.dumps(nicknames, ensure_ascii=False)
+            if isinstance(nicknames, list)
+            else nicknames
+        )
+    body = "\n\n".join(
+        f"<!-- self_prompt:{key} -->\n{value}\n<!-- /self_prompt:{key} -->"
+        for key, value in values.items()
+    )
+    return f"# 你维护的固定设定\n<!-- self_prompt:fixed:v2 -->\n{fixed}\n<!-- /self_prompt:fixed:v2 -->\n\n# 机器人可维护内容\n<!-- self_prompt:editable:v2 -->\n{body}\n<!-- /self_prompt:editable:v2 -->"
+
+
 class CompletionInput:
     """Control only completion output; run capture, validation and saving normally."""
 

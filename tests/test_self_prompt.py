@@ -19,7 +19,7 @@ from astrbot_plugin_self_prompt.prompt_document import (
     read_sections,
     replace_section,
 )
-from astrbot_plugin_self_prompt.tests.support import Sandbox
+from astrbot_plugin_self_prompt.tests.support import Sandbox, legacy_prompt
 
 
 class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -48,8 +48,11 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertNotRegex(wire, r"revision|version_id|版本")
         memory = json.loads(await self.p.get_self_prompt(self.s.event))
-        self.assertEqual(set(memory), {"ok", "fixed_prompt", "sections"})
-        self.assertEqual(set(memory["sections"]), {"persona", "output_preferences", "nicknames"})
+        self.assertEqual(set(memory), {"ok", "sections"})
+        self.assertEqual(
+            set(memory["sections"]),
+            {"persona", "output_preferences", "nicknames", "other"},
+        )
         self.assertNotIn("self_prompt:", self.s.request.system_prompt)
         self.assertNotIn("版本", self.s.request.system_prompt)
         req = self.s.request
@@ -60,28 +63,21 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("update_self_prompt", req.func_tool.names())
         self.assertNotIn("notebook_list", req.func_tool.names())
 
-    async def test_legacy_other_memory_moves_once_without_loss(self):
-        old = replace_section("Nickname Echo", "memory", "原文" * 9000)
+    async def test_legacy_other_memory_remains_resident_without_loss(self):
+        old = legacy_prompt(persona="Nickname Echo", memory="原文" * 9000)
         # Supply a legacy prompt as if it had existed before plugin installation.
         await self.p._original_update("default", system_prompt=old)
         await self.p._ensure_layout("default")
         current = (await self.s.manager.get_persona("default")).system_prompt
-        self.assertEqual(read_sections(current)["memory"], "")
+        self.assertEqual(read_sections(current)["other"], "原文" * 9000)
         pages = self.p.store.catalog("default", self.p.settings())["pages"]
-        self.assertEqual(len(pages), 2)
-        self.assertEqual(
-            "".join(
-                self.p.store.page("default", row["page_id"])["content"] for row in pages
-            ),
-            "原文" * 9000,
-        )
+        self.assertEqual(len(pages), 0)
         await self.p._ensure_layout("default")
         self.assertEqual(
-            len(self.p.store.catalog("default", self.p.settings())["pages"]), 2
+            len(self.p.store.catalog("default", self.p.settings())["pages"]), 0
         )
         request = await self.s.prepare(self.s.message(2))
-        self.assertNotIn("原文原文", request.system_prompt)
-        self.assertIn("迁移记忆", request.extra_user_content_parts[0]["text"])
+        self.assertIn("原文原文", request.system_prompt)
 
     async def test_notebook_guidance_is_only_in_reply_tool_definitions(self):
         await self.p.notebook_create(
@@ -110,14 +106,16 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("流程", message_text)
         self.assertNotIn("private page body", message_text)
 
-    async def test_failed_migration_preserves_entire_original(self):
+    async def test_upgrade_does_not_require_free_notebook_pages(self):
         self.s.config["notebook_max_pages"] = 1
-        old = replace_section("Core", "memory", "x" * 13000)
+        old = legacy_prompt(persona="Core", memory="x" * 13000)
         await self.p._original_update("default", system_prompt=old)
-        with self.assertRaisesRegex(ValueError, "notebook_full"):
-            await self.p._ensure_layout("default")
+        await self.p._ensure_layout("default")
         self.assertEqual(
-            (await self.s.manager.get_persona("default")).system_prompt, old
+            read_sections((await self.s.manager.get_persona("default")).system_prompt)[
+                "other"
+            ],
+            "x" * 13000,
         )
         self.assertEqual(
             self.p.store.catalog("default", self.p.settings())["page_count"], 0
@@ -201,7 +199,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_configurable_batch_updates_and_preserves_sources(self):
         self.s.config["auto_memory_message_interval"] = 3
-        self.s.provider.text = '{"updates":{"persona":"Nickname Echo"}}'
+        self.s.provider.text = '{"updates":{"other":"Remembered agreement"}}'
         await self.collect(2)
         await self.p._process_ready()
         self.assertEqual(len(self.s.provider.calls), 0)
@@ -219,9 +217,9 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             read_sections((await self.s.manager.get_persona("default")).system_prompt)[
-                "persona"
+                "other"
             ],
-            "Nickname Echo",
+            "Remembered agreement",
         )
         payload = self.s.provider.calls[0]
         self.assertNotIn("revision", payload["prompt"])
@@ -258,7 +256,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_over_budget_memory_still_records_sources(self):
         current = (await self.s.manager.get_persona("default")).system_prompt
         await self.s.manager.update_persona(
-            "default", system_prompt=replace_section(current, "persona", "x" * 8100)
+            "default", system_prompt=replace_section(current, "other", "x" * 8100)
         )
         self.s.config["auto_memory_message_interval"] = 1
         await self.collect(1)
@@ -387,7 +385,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             updated = replace_section(original, "persona", "Owner says this")
             await self.s.manager.update_persona("default", system_prompt=updated)
             return LLMResponse(
-                "assistant", completion_text='{"updates":{"persona":"Stale result"}}'
+                "assistant", completion_text='{"updates":{"other":"Stale result"}}'
             )
 
         self.s.provider.text = intervene
@@ -410,7 +408,10 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.collect(1)
         for text in (
             '{"updates":{"memory":"not allowed"}}',
-            json.dumps({"updates": {"persona": "x" * 8001}}),
+            '{"updates":{"persona":"not allowed"}}',
+            '{"updates":{"output_preferences":"not allowed"}}',
+            '{"updates":{"nicknames":["not allowed"]}}',
+            json.dumps({"updates": {"other": "x" * 8001}}),
         ):
             self.s.provider.text = text
             self.p._retry_after.clear()
@@ -420,12 +421,16 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 (await self.s.manager.get_persona("default")).system_prompt, original
             )
 
-    async def test_native_editor_saves_each_snapshot_and_keeps_fixed(self):
+    async def test_native_editor_saves_each_snapshot_and_keeps_preferences(self):
         original = (await self.s.manager.get_persona("default")).system_prompt
         first = owner_edit(
             original,
-            "Exact fixed  \n",
-            {"persona": "First", "output_preferences": "Short", "nicknames": "Echo"},
+            {
+                "persona": "First",
+                "output_preferences": "Exact preference  \n",
+                "nicknames": ["Echo"],
+                "other": "",
+            },
         )
         await self.s.manager.update_persona("default", system_prompt=first)
         second = replace_section(first, "persona", "Second")
@@ -442,14 +447,17 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
             ["Second", "First"],
         )
-        self.assertEqual(current_memory(second)["fixed_prompt"], "Exact fixed  \n")
+        self.assertEqual(
+            current_memory(second)["sections"]["output_preferences"],
+            "Exact preference  \n",
+        )
         self.assertTrue(all(row["sources"] == [] for row in manual))
 
     async def test_prepared_write_recovers_and_acknowledges_exact_batch(self):
         self.s.config["auto_memory_message_interval"] = 2
         await self.collect(3)
         original = (await self.s.manager.get_persona("default")).system_prompt
-        target = replace_section(original, "persona", "Recovered")
+        target = replace_section(original, "other", "Recovered")
         scope = self.p.store.ready(2)[0]
         records = self.p.store.batch(scope["id"], 2)
         record_id = self.p.store.stage(
@@ -525,12 +533,9 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.collect(2)
         before = (await self.s.manager.get_persona("default")).system_prompt
-        persona = (
-            read_sections(before)["persona"]
-            + "\n新绰号是机器人的称呼；lljy＝柳浪家园。"
-        )
+        other = read_sections(before)["other"] + "\n成员甲确认了明日的约定。"
         self.s.provider.text = json.dumps(
-            {"updates": {"persona": persona}}, ensure_ascii=False
+            {"updates": {"other": other}}, ensure_ascii=False
         )
         await self.p._process_ready()
         payload = json.loads(self.s.provider.calls[0]["prompt"])
@@ -539,7 +544,10 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("新绰号", notes[0]["text"])
         self.assertNotIn("page_stamp", notes[0])
         actual = (await self.s.manager.get_persona("default")).system_prompt
-        self.assertIn("新绰号", read_sections(actual)["persona"])
+        self.assertIn("明日的约定", read_sections(actual)["other"])
+        self.assertEqual(
+            read_sections(actual)["persona"], read_sections(before)["persona"]
+        )
         automatic = next(
             r for r in self.p.store.records("default") if r["kind"] == "automatic"
         )

@@ -22,7 +22,7 @@ let browser;
   await page.goto(process.argv[2]+'/preview/');
   const waitStatus=text=>page.waitForFunction(value=>document.getElementById('status').textContent===value,text);
   await waitStatus('已载入');
-  const fixed=await page.locator('#fixed').inputValue();
+  assert.equal(await page.locator('#fixed').count(),0);
   const persona=await page.locator('#character').inputValue();
   const preferences=await page.locator('#preferences').inputValue();
   for(const value of [' 机器人：阿蓝 ', '成员甲：小甲', '机器人：阿蓝']) {
@@ -39,7 +39,6 @@ let browser;
   await page.locator('#refresh').click();
   await waitStatus('已载入');
   assert.deepEqual(await page.locator('#nicknames input').evaluateAll(inputs=>inputs.map(input=>input.value)),['机器人：小蓝']);
-  assert.equal(await page.locator('#fixed').inputValue(),fixed);
   assert.equal(await page.locator('#character').inputValue(),persona);
   assert.equal(await page.locator('#preferences').inputValue(),preferences);
   await page.locator('[data-tab="records"]').click();

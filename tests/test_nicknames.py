@@ -10,14 +10,12 @@ from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_self_prompt.auto_memory import apply_summary
 from astrbot_plugin_self_prompt.core_memory import current_memory, owner_edit
 from astrbot_plugin_self_prompt.main import WRITE_CONTEXT
-from astrbot_plugin_self_prompt.nicknames import read_nicknames
 from astrbot_plugin_self_prompt.prompt_document import (
     ensure_layout,
-    read_fixed,
     read_sections,
     replace_section,
 )
-from astrbot_plugin_self_prompt.tests.support import Sandbox, app_for
+from astrbot_plugin_self_prompt.tests.support import Sandbox, app_for, legacy_prompt
 
 
 def configured(names=None):
@@ -25,11 +23,11 @@ def configured(names=None):
         "外部附注\n"
         + owner_edit(
             ensure_layout("人设原文"),
-            "固定设定  \n不能改",
             {
                 "persona": "人设原文",
                 "output_preferences": "回复偏好原文",
                 "nicknames": names if names is not None else ["机器人：阿蓝"],
+                "other": "其他原文",
             },
         )
         + "\n末尾附注"
@@ -37,12 +35,13 @@ def configured(names=None):
 
 
 @pytest.mark.asyncio
-async def test_legacy_text_migrates_once_with_backup_and_fixed_bytes_preserved():
+async def test_legacy_text_migrates_once_with_backup_and_owner_content_preserved():
     s = await Sandbox().open()
     try:
-        original = configured([]).replace(
-            "<!-- self_prompt:nicknames -->\n[]\n",
-            "<!-- self_prompt:nicknames -->\n  机器人：阿蓝  \n\n成员甲：阿甲\n机器人：阿蓝\n",
+        original = (
+            "外部附注\n"
+            + legacy_prompt(nicknames="  机器人：阿蓝  \n\n成员甲：阿甲\n机器人：阿蓝")
+            + "\n末尾附注"
         )
         await s.plugin._original_update("default", system_prompt=original)
         await s.plugin._ensure_layout("default")
@@ -51,8 +50,7 @@ async def test_legacy_text_migrates_once_with_backup_and_fixed_bytes_preserved()
             "机器人：阿蓝",
             "成员甲：阿甲",
         ]
-        assert read_fixed(actual) == read_fixed(original)
-        for key in ("persona", "output_preferences", "memory"):
+        for key in ("persona", "output_preferences", "other"):
             assert read_sections(actual)[key] == read_sections(original)[key]
         assert actual.startswith("外部附注\n") and actual.endswith("\n末尾附注")
         backups = list((s.plugin._data / "backups").rglob("*.txt"))
@@ -138,10 +136,9 @@ async def test_tool_rejects_invalid_items_and_cannot_write_other_areas():
             assert (await s.manager.get_persona("default")).system_prompt == original
         # Exercise the save guard itself, beyond the public tool's narrow args.
         for target in (
-            original.replace("固定设定", "被篡改"),
             replace_section(original, "persona", "被篡改"),
             replace_section(original, "output_preferences", "被篡改"),
-            replace_section(original, "memory", "被篡改"),
+            replace_section(original, "other", "被篡改"),
             original.replace("## 回复偏好", "## 被篡改"),
             original.replace("外部附注", "被篡改"),
         ):
@@ -202,7 +199,7 @@ async def test_concurrent_deltas_preserve_both_changes_and_budget_failure_keeps_
 
 
 @pytest.mark.asyncio
-async def test_dashboard_list_save_and_background_consolidation_use_same_list():
+async def test_dashboard_nickname_list_is_read_only_to_background_consolidation():
     s = await Sandbox().open()
     try:
         async with httpx.AsyncClient(
@@ -231,24 +228,20 @@ async def test_dashboard_list_save_and_background_consolidation_use_same_list():
                 "机器人：小蓝",
                 "成员甲：阿甲",
             ]
-        fixed = state["memory"]["fixed_prompt"]
+        owner = state["memory"]["sections"]["persona"]
         s.config["auto_memory_message_interval"] = 1
         s.provider.text = json.dumps(
-            {
-                "updates": {
-                    "nicknames": ["机器人：小蓝", "成员甲：阿甲", "成员乙：小乙"]
-                }
-            },
+            {"updates": {"other": "一条已确认的约定"}},
             ensure_ascii=False,
         )
         await s.plugin.collect_history(s.message(20, "成员乙明确约定昵称小乙"))
         await s.plugin._process_ready()
         actual = (await s.manager.get_persona("default")).system_prompt
-        assert read_fixed(actual) == fixed
+        assert read_sections(actual)["persona"] == owner
+        assert read_sections(actual)["other"] == "一条已确认的约定"
         assert current_memory(actual)["sections"]["nicknames"] == [
             "机器人：小蓝",
             "成员甲：阿甲",
-            "成员乙：小乙",
         ]
         model_input = s.provider.calls[0]["prompt"]
         assert isinstance(json.loads(model_input)["sections"]["nicknames"], list)
@@ -256,25 +249,9 @@ async def test_dashboard_list_save_and_background_consolidation_use_same_list():
         await s.close()
 
 
-def test_list_update_and_exact_item_transfer_preserve_remaining_nicknames():
+def test_summary_rejects_nickname_updates_and_old_transfer_contract():
     original = configured(["机器人：小蓝", "旧黑话表示暂停", "成员甲：阿甲"])
-    result = apply_summary(
-        original,
-        json.dumps(
-            {
-                "updates": {},
-                "notebook_transfers": [
-                    {"section": "nicknames", "text": "旧黑话表示暂停"}
-                ],
-            }
-        ),
-    )
-    assert read_nicknames(read_sections(result)["nicknames"]) == [
-        "机器人：小蓝",
-        "成员甲：阿甲",
-    ]
-    assert read_sections(result)["memory"] == "旧黑话表示暂停"
-    with pytest.raises(ValueError, match="invalid_transfer"):
+    with pytest.raises(ValueError, match="invalid_summary"):
         apply_summary(
             original,
             json.dumps(
@@ -284,5 +261,5 @@ def test_list_update_and_exact_item_transfer_preserve_remaining_nicknames():
                 }
             ),
         )
-    cleared = apply_summary(original, '{"updates":{"nicknames":[]}}')
-    assert current_memory(cleared)["sections"]["nicknames"] == []
+    with pytest.raises(ValueError, match="invalid_sections"):
+        apply_summary(original, '{"updates":{"nicknames":[]}}')

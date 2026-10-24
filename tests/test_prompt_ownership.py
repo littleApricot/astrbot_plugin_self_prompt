@@ -1,4 +1,4 @@
-"""Verify migration and the immutable boundary around owner instructions."""
+"""Specify owner and model write boundaries for the four-section layout."""
 
 import unittest
 
@@ -12,21 +12,21 @@ from astrbot_plugin_self_prompt.prompt_document import (
     START,
     assert_editable_change,
     ensure_layout,
-    read_fixed,
     read_sections,
     replace_section,
 )
+from astrbot_plugin_self_prompt.tests.support import legacy_prompt
 
 
 class PromptOwnershipTests(unittest.TestCase):
-    def test_plain_prompt_goes_to_editable_and_fixed_starts_empty(self):
+    def test_plain_prompt_preserves_original_in_owner_persona(self):
         original = "Nickname: Echo.\nPreserve all original whitespace.  \n\n"
         migrated = ensure_layout(original)
-        self.assertEqual(read_fixed(migrated), "")
         self.assertEqual(read_sections(migrated)["persona"], original)
+        self.assertEqual(read_sections(migrated)["other"], "")
         self.assertEqual(ensure_layout(migrated), migrated)
 
-    def test_v1_sections_and_surrounding_notes_remain_editable(self):
+    def test_v1_sections_and_surrounding_notes_survive_upgrade(self):
         values = {
             "persona": "Original persona",
             "output_preferences": "Short replies",
@@ -38,50 +38,58 @@ class PromptOwnershipTests(unittest.TestCase):
                 f"<!-- self_prompt:{section} -->\n{value}\n<!-- /self_prompt:{section} -->"
             )
         parts.extend([LEGACY_END, "Trailing note"])
-        migrated = ensure_layout("\n\n".join(parts))
-        self.assertEqual(read_fixed(migrated), "")
-        sections = read_sections(migrated)
+        sections = read_sections("\n\n".join(parts))
         self.assertIn("Leading note", sections["persona"])
-        self.assertIn(values["persona"], sections["persona"])
+        self.assertIn("Original persona", sections["persona"])
         self.assertIn("Trailing note", sections["persona"])
-        self.assertEqual(sections["output_preferences"], values["output_preferences"])
-        self.assertEqual(sections["memory"], values["memory"])
+        self.assertEqual(sections["output_preferences"], "Short replies")
+        self.assertEqual(sections["other"], "Remembered fact")
 
-    def test_fixed_text_and_every_byte_outside_editable_survive_all_updates(self):
-        prompt = ensure_layout("Editable persona")
-        fixed = "Keep this exact.  \n\nAn owner note.\n"
-        prompt = prompt.replace(
-            FIXED_START + "\n\n" + FIXED_END,
-            FIXED_START + "\n" + fixed + "\n" + FIXED_END,
+    def test_v2_fixed_text_merges_into_owner_persona_once(self):
+        old = legacy_prompt(
+            fixed="Keep exact.  \n", persona="Original persona", memory="Old memory"
         )
-        prompt = "External protected prefix\n" + prompt + "\nProtected suffix"
-        updated = prompt
-        for section in SECTIONS:
-            updated = replace_section(updated, section, "Updated " + section)
-            self.assertEqual(read_fixed(updated), fixed)
-            assert_editable_change(prompt, updated)
-        self.assertTrue(updated.startswith("External protected prefix\n"))
-        self.assertTrue(updated.endswith("\nProtected suffix"))
-        with self.assertRaisesRegex(ValueError, "fixed_prompt_modified"):
-            assert_editable_change(
-                prompt, updated.replace("Keep this exact.", "Changed.")
-            )
+        upgraded = ensure_layout(old)
+        self.assertEqual(
+            read_sections(upgraded)["persona"], "Keep exact.  \n\n\nOriginal persona"
+        )
+        self.assertEqual(read_sections(upgraded)["other"], "Old memory")
+        self.assertNotIn(FIXED_START, upgraded)
+        self.assertEqual(ensure_layout(upgraded), upgraded)
 
-    def test_fixed_markers_inside_editable_and_damaged_boundaries_are_rejected(self):
-        prompt = ensure_layout("Editable")
-        inside = prompt.replace(FIXED_START + "\n\n" + FIXED_END, "")
-        inside = inside.replace(START, START + "\n" + FIXED_START + "\n\n" + FIXED_END)
-        for bad in [
-            inside,
+    def test_automatic_and_nickname_writers_have_distinct_exact_boundaries(self):
+        original = (
+            "External prefix\n"
+            + ensure_layout("Owner persona  \n")
+            + "\nExternal suffix"
+        )
+        for allowed in ("other", "nicknames"):
+            for key in SECTIONS:
+                updated = replace_section(original, key, "New value")
+                if key == allowed:
+                    assert_editable_change(original, updated, (allowed,))
+                else:
+                    with self.assertRaisesRegex(
+                        ValueError, "protected_sections_modified"
+                    ):
+                        assert_editable_change(original, updated, (allowed,))
+            with self.assertRaisesRegex(ValueError, "protected_sections_modified"):
+                assert_editable_change(
+                    original, original.replace("External prefix", "Changed"), (allowed,)
+                )
+
+    def test_damaged_boundaries_are_rejected(self):
+        prompt = ensure_layout("Owner")
+        for bad in (
             prompt.replace(END, ""),
             prompt + END,
-            prompt.replace(FIXED_END, ""),
-        ]:
+            prompt + FIXED_START + FIXED_END,
+        ):
             with self.subTest(prompt=bad), self.assertRaises(ValueError):
-                replace_section(bad, "memory", "attempt")
+                replace_section(bad, "other", "attempt")
 
-    def test_model_cannot_inject_boundary_markers_in_any_editable_field(self):
-        prompt = ensure_layout("Editable")
+    def test_model_cannot_inject_boundary_markers_in_any_field(self):
+        prompt = ensure_layout("Owner")
         for section in SECTIONS:
             for marker in (START, END, FIXED_START, FIXED_END, LEGACY_START):
                 with (

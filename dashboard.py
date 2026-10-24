@@ -171,9 +171,7 @@ class Dashboard:
             persona = await self._persona(body.get("persona_id"))
             if digest(persona.system_prompt) != body.get("stamp"):
                 raise ValueError("content_changed")
-            updated = owner_edit(
-                persona.system_prompt, body["fixed_prompt"], body["sections"]
-            )
+            updated = owner_edit(persona.system_prompt, body["sections"])
             token = WRITE_CONTEXT.set(
                 {"kind": "manual", "expected": persona.system_prompt}
             )
@@ -238,12 +236,14 @@ class Dashboard:
             if record["state"] != "committed":
                 raise ValueError("invalid_request")
             old = current_memory(record["content"])
-            fixed = (
-                old["fixed_prompt"]
-                if body.get("include_fixed") is True
-                else current_memory(persona.system_prompt)["fixed_prompt"]
-            )
-            updated = owner_edit(persona.system_prompt, fixed, old["sections"])
+            sections = old["sections"]
+            if body.get("include_owner") is not True:
+                current = current_memory(persona.system_prompt)["sections"]
+                sections = {
+                    **sections,
+                    **{key: current[key] for key in ("persona", "output_preferences")},
+                }
+            updated = owner_edit(persona.system_prompt, sections)
             token = WRITE_CONTEXT.set(
                 {
                     "kind": "restore",
