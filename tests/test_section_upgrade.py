@@ -40,7 +40,7 @@ def test_old_layout_preserves_fixed_and_original_body():
         "## 回复偏好\n", "## 输出偏好要求\n"
     )
     old = old.replace(
-        "## 昵称\n<!-- self_prompt:nicknames -->\n甲昵称\n<!-- /self_prompt:nicknames -->",
+        '## 昵称\n<!-- self_prompt:nicknames -->\n["甲昵称"]\n<!-- /self_prompt:nicknames -->',
         "",
     )
     new = ensure_layout(old)

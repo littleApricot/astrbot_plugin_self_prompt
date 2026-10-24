@@ -16,7 +16,8 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 
 from .auto_memory import SUMMARY_PROMPT, apply_summary, history_chunks
-from .core_memory import current_memory, project_history, render_current
+from .core_memory import current_memory, editable_bytes, project_history, render_current
+from .nicknames import nickname_text, read_nicknames, validate_nicknames
 from .prompt_document import (
     assert_editable_change,
     ensure_layout,
@@ -41,6 +42,10 @@ ERRORS = {
     "catalog_budget_exceeded": "目录过长，请缩短名称和描述或合并主题。",
     "invalid_settings": "插件配置无效，请联系管理员检查。",
     "storage_error": "操作未确认成功，请稍后重试。",
+    "invalid_nicknames": "昵称必须是非空字符串组成的列表。",
+    "nickname_action_required": "至少提供要添加或移除的昵称。",
+    "content_changed": "内容已变化，请重新读取后重试。",
+    "memory_budget_exceeded": "常驻内容已超过字节上限，请精简后重试。",
 }
 
 
@@ -67,6 +72,7 @@ class SelfPrompt(Star):
         manager = context.get_llm_tool_manager()
         for name, required in {
             "get_self_prompt": [],
+            "nickname_update": [],
             "notebook_read": ["page_id"],
             "notebook_create": ["title", "description", "content"],
             "notebook_update": ["page_id"],
@@ -82,6 +88,11 @@ class SelfPrompt(Star):
                     tool.parameters["properties"]["limit"].update(
                         minimum=1, maximum=4000
                     )
+                elif name == "nickname_update":
+                    for key in ("add", "remove"):
+                        tool.parameters["properties"][key].update(
+                            type="array", items={"type": "string"}
+                        )
         # Older tool registrations can remain during a hot reload.
         for name in ("update_self_prompt", "notebook_list"):
             old = manager.get_func(name)
@@ -120,6 +131,7 @@ class SelfPrompt(Star):
             "temporary": catalog,
             "history_tools": {
                 "get_self_prompt": "keep",
+                "nickname_update": "keep",
                 "notebook_read": "keep",
                 "notebook_create": "keep",
                 "notebook_update": "keep",
@@ -152,15 +164,23 @@ class SelfPrompt(Star):
             if "expected" in meta and original != meta["expected"]:
                 raise ValueError("content_changed")
             normalized = ensure_layout(requested)
-            notes = read_sections(normalized)["memory"]
-            target = replace_section(normalized, "memory", "") if notes else normalized
-            limits = self.settings()
-            if meta["kind"] == "automatic":
-                assert_editable_change(original, target)
-                size = sum(
-                    len(text.encode())
-                    for text in current_memory(target)["sections"].values()
+            if meta["kind"] == "nickname_tool":
+                assert_editable_change(original, normalized)
+                expected_target = replace_section(
+                    original, "nicknames", read_sections(normalized)["nicknames"]
                 )
+                if normalized != expected_target:
+                    raise ValueError("invalid_sections")
+                notes, target = "", normalized
+            else:
+                notes = read_sections(normalized)["memory"]
+                target = (
+                    replace_section(normalized, "memory", "") if notes else normalized
+                )
+            limits = self.settings()
+            if meta["kind"] in {"automatic", "nickname_tool"}:
+                assert_editable_change(original, target)
+                size = editable_bytes(target)
                 if target != original and size > limits.memory_bytes:
                     raise ValueError("memory_budget_exceeded")
             self._backup(persona_id, original)
@@ -580,9 +600,9 @@ class SelfPrompt(Star):
 
     @filter.llm_tool(name="get_self_prompt")
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
-        """读取当前固定设定和常驻记忆，日常聊天只读。
+        """读取当前固定设定、人设、回复偏好和昵称列表。
 
-        常驻内容分为性格和人设、回复偏好、昵称；
+        昵称可用 nickname_update 增删；
         黑话、事实、约定和流程通过记事本工具维护。
         """
         try:
@@ -591,6 +611,64 @@ class SelfPrompt(Star):
                 {"ok": True, **current_memory(persona.system_prompt)},
                 ensure_ascii=False,
             )
+        except Exception as exc:
+            return self._error(exc)
+
+    @filter.llm_tool(name="nickname_update")
+    async def nickname_update(
+        self,
+        event: AstrMessageEvent,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> str:
+        """根据明确的昵称约定或纠正，添加、移除昵称。改名时同时移除旧项、添加新项。
+
+        先通过当前昵称列表或 get_self_prompt 确认具体条目；删除时填写原条目。
+        昵称对应谁应写清楚，黑话含义放进记事本。
+
+        Args:
+            add(array[string]): 要添加的昵称条目，可省略。
+            remove(array[string]): 要移除的完整条目，可省略。
+        """
+        try:
+            additions = validate_nicknames([] if add is None else add)
+            removals = validate_nicknames([] if remove is None else remove)
+            if not additions and not removals:
+                raise ValueError("nickname_action_required")
+            if set(additions) & set(removals):
+                raise ValueError("invalid_nicknames")
+            persona_id = self._persona(event)
+            for _ in range(3):
+                original = (await self._manager.get_persona(persona_id)).system_prompt
+                names = read_nicknames(read_sections(original)["nicknames"])
+                updated_names = [name for name in names if name not in removals]
+                updated_names.extend(
+                    name for name in additions if name not in updated_names
+                )
+                updated = replace_section(
+                    original, "nicknames", nickname_text(updated_names)
+                )
+                if updated != original:
+                    token = WRITE_CONTEXT.set(
+                        {"kind": "nickname_tool", "expected": original}
+                    )
+                    try:
+                        await self._manager.update_persona(
+                            persona_id, system_prompt=updated
+                        )
+                    except ValueError as exc:
+                        if str(exc) == "content_changed":
+                            continue
+                        raise
+                    finally:
+                        WRITE_CONTEXT.reset(token)
+                rendered = render_current(updated)
+                event.set_extra("self_prompt_system_text", rendered)
+                event.set_extra("reply_gate_memory", rendered)
+                return json.dumps(
+                    {"ok": True, "nicknames": updated_names}, ensure_ascii=False
+                )
+            raise ValueError("content_changed")
         except Exception as exc:
             return self._error(exc)
 

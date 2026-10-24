@@ -35,6 +35,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(self.p, "notebook_list"))
         for name in (
             "get_self_prompt",
+            "nickname_update",
             "notebook_read",
             "notebook_create",
             "notebook_update",

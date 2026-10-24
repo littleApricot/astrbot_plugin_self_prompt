@@ -2,8 +2,10 @@ const $ = (id) => document.getElementById(id);
 const bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
 let state, selectedPage, selectedRecord, offset = 0, loading = 0, latestSeen = null;
 let activeTab = 'memory';
-const kinds = {automatic:'自动整理',manual:'手动编辑',migration:'升级迁移',baseline:'初始内容',external:'外部保存',restore:'恢复记忆',legacy_backup:'旧备份导入'};
+const kinds = {automatic:'自动整理',nickname_tool:'昵称维护',manual:'手动编辑',migration:'升级迁移',baseline:'初始内容',external:'外部保存',restore:'恢复记忆',legacy_backup:'旧备份导入'};
 function node(tag, text, cls) {const el=document.createElement(tag); if(text!==undefined)el.textContent=text; if(cls)el.className=cls; return el;}
+function nicknameRow(value='') {const row=node('div',undefined,'nickname-row'),input=node('input'),remove=node('button','删除');input.value=value;input.setAttribute('aria-label','昵称条目');remove.type='button';remove.setAttribute('aria-label','删除昵称');remove.onclick=()=>row.remove();row.append(input,remove);$('nicknames').append(row);return input;}
+function nicknameValues(value) {return Array.isArray(value)?value:String(value||'').split('\n').filter(line=>line.trim());}
 function date(text) {try{return new Intl.DateTimeFormat('zh-CN',{timeZone:state?.time_zone||'Asia/Shanghai',dateStyle:'medium',timeStyle:'medium'}).format(new Date(text));}catch{return text;}}
 async function api(method, endpoint, body={}) {const r=method==='GET'?await bridge.apiGet(endpoint,body):await bridge.apiPost(endpoint,body); return r?.status==='ok'?r.data:r;}
 function payload(extra={}) {return {persona_id:state.persona_id,...extra};}
@@ -16,7 +18,7 @@ async function load() {
     if(generation!==loading)return;
     state=next;
     $('persona').replaceChildren(...state.personas.map(id=>{const option=node('option',id);option.value=id;return option;}));$('persona').value=state.persona_id;
-    $('fixed').value=state.memory.fixed_prompt;$('character').value=state.memory.sections.persona;$('preferences').value=state.memory.sections.output_preferences;$('nicknames').value=state.memory.sections.nicknames||'';
+    $('fixed').value=state.memory.fixed_prompt;$('character').value=state.memory.sections.persona;$('preferences').value=state.memory.sections.output_preferences;$('nicknames').replaceChildren();for(const name of nicknameValues(state.memory.sections.nicknames))nicknameRow(name);
     $('stats').textContent='正式回复常驻资料 '+state.protected_bytes+' 字节 · 可整理记忆 '+state.memory_bytes+' / '+state.settings.long_term_memory_max_bytes+' 字节'+(state.decision_budget?'\n判断总预算 '+state.decision_budget+' 字节（还包含判断指令和请求封装）':'');
     $('budget-actions').replaceChildren();
     if(state.decision_budget){
@@ -47,7 +49,7 @@ async function openPage(id){
   try{selectedPage=id?await api('GET','page',payload({page_id:id})):null;$('page-heading').textContent=id?'编辑页面':'新建页面';$('page-title').value=selectedPage?.title||'';$('page-description').value=selectedPage?.description||'';$('page-content').value=selectedPage?.content||'';$('page-status').textContent='';$('delete-page').hidden=!id;$('page-editor').showModal();}catch(e){$('status').textContent=e.message;}
 }
 async function openRecord(id){
-  try{selectedRecord=await api('GET','records',payload({record_id:id}));const r=selectedRecord;$('record-meta').textContent=date(r.created_at)+' · '+(kinds[r.kind]||r.kind)+' · '+result(r);$('record-memory').replaceChildren();for(const [title,text] of [['固定设定',r.memory.fixed_prompt],['性格和人设',r.memory.sections.persona],['回复偏好',r.memory.sections.output_preferences],['昵称',r.memory.sections.nicknames]])$('record-memory').append(node('h3',title),node('pre',text||'（空）'));
+  try{selectedRecord=await api('GET','records',payload({record_id:id}));const r=selectedRecord;$('record-meta').textContent=date(r.created_at)+' · '+(kinds[r.kind]||r.kind)+' · '+result(r);$('record-memory').replaceChildren();for(const [title,text] of [['固定设定',r.memory.fixed_prompt],['性格和人设',r.memory.sections.persona],['回复偏好',r.memory.sections.output_preferences],['昵称',nicknameValues(r.memory.sections.nicknames).map(name=>'• '+name).join('\n')]])$('record-memory').append(node('h3',title),node('pre',text||'（空）'));
     if(r.legacy_text)$('record-memory').append(node('h3','旧备份全文（时间为导入时间）'),node('pre',r.legacy_text));
     $('sources').replaceChildren();for(const source of r.sources){const section=node('article',undefined,'source');section.append(node('p',(source.sender_name||source.role||'')+' · '+(source.sender_id||'')+' · '+(source.time?date(source.time):''),'muted'),node('p',source.origin||'','muted'),node('pre',source.text||''));if(source.parts?.length){const details=node('details'),summary=node('summary','原消息结构');details.append(summary,node('pre',JSON.stringify(source.parts,null,2)));section.append(details);}$('sources').append(section);}if(!r.sources.length)$('sources').append(node('p','这条记录没有聊天原文来源（例如手动编辑或升级前的内容）。','muted'));
     $('include-fixed').checked=false;$('restore-memory').hidden=r.state!=='committed';$('record-status').textContent='';$('record-detail').showModal();
@@ -57,7 +59,8 @@ for(const button of document.querySelectorAll('nav button'))button.onclick=()=>t
 $('refresh').onclick=load;
 $('persona').onchange=()=>{offset=0;latestSeen=null;load();};
 $('new-page').onclick=()=>openPage(null);
-$('save-memory').onclick=async()=>{try{await api('POST','memory',payload({stamp:state.stamp,fixed_prompt:$('fixed').value,sections:{persona:$('character').value,output_preferences:$('preferences').value,nicknames:$('nicknames').value}}));await load();$('status').textContent='记忆已保存';}catch(e){$('status').textContent=e.message;}};
+$('add-nickname').onclick=()=>nicknameRow().focus();
+$('save-memory').onclick=async()=>{try{await api('POST','memory',payload({stamp:state.stamp,fixed_prompt:$('fixed').value,sections:{persona:$('character').value,output_preferences:$('preferences').value,nicknames:[...$('nicknames').querySelectorAll('input')].map(input=>input.value.trim()).filter(Boolean)}}));await load();$('status').textContent='记忆已保存';}catch(e){$('status').textContent=e.message;}};
 $('save-page').onclick=async()=>{try{await api('POST','page',payload({action:selectedPage?'update':'create',...(selectedPage?{page_id:selectedPage.page_id,stamp:selectedPage.stamp}:{}),title:$('page-title').value,description:$('page-description').value,content:$('page-content').value}));$('page-editor').close();await load();$('status').textContent='页面已保存';}catch(e){$('page-status').textContent=e.message;}};
 $('delete-page').onclick=async()=>{if(!confirm('删除这页记事本？'))return;try{await api('POST','page',payload({action:'delete',page_id:selectedPage.page_id,stamp:selectedPage.stamp}));$('page-editor').close();await load();$('status').textContent='页面已删除';}catch(e){$('page-status').textContent=e.message;}};
 $('restore-memory').onclick=async()=>{try{await api('POST','restore',payload({stamp:state.stamp,record_id:selectedRecord.id,include_fixed:$('include-fixed').checked}));$('record-detail').close();await load();$('status').textContent='所选记忆已恢复';}catch(e){$('record-status').textContent=e.message;}};

@@ -4,6 +4,7 @@ import copy
 import json
 import re
 
+from .nicknames import nickname_text, read_nicknames
 from .prompt_document import (
     FIXED_END,
     FIXED_START,
@@ -23,11 +24,19 @@ def current_memory(prompt):
     return {
         "fixed_prompt": read_fixed(prompt),
         "sections": {
-            key: value
+            key: read_nicknames(value) if key == "nicknames" else value
             for key, value in read_sections(prompt).items()
             if key in CORE_SECTIONS
         },
     }
+
+
+def editable_bytes(prompt):
+    return sum(
+        len(value.encode())
+        for key, value in read_sections(ensure_layout(prompt)).items()
+        if key in CORE_SECTIONS
+    )
 
 
 def render_current(prompt):
@@ -56,6 +65,8 @@ def owner_edit(prompt, fixed, sections):
         raise ValueError("invalid_sections")
     result = ensure_layout(prompt)
     for key, text in sections.items():
+        if key == "nicknames":
+            text = nickname_text(read_nicknames(text))
         result = replace_section(result, key, text)
     begin = result.index(FIXED_START) + len(FIXED_START)
     end = result.index(FIXED_END, begin)

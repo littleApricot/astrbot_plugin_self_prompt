@@ -15,7 +15,7 @@
     <label>固定设定<textarea id="fixed" rows="8"></textarea></label>
     <label>性格和人设<textarea id="character" rows="6"></textarea></label>
     <label>回复偏好<textarea id="preferences" rows="5"></textarea></label>
-    <label>昵称<textarea id="nicknames" rows="5"></textarea></label>
+    <fieldset class="nickname-list"><legend>昵称</legend><div id="nicknames"></div><button id="add-nickname" type="button">添加昵称</button></fieldset>
     <button id="save-memory" class="primary">保存记忆</button><p id="progress" class="muted"></p>
   </section>
   <section id="notebook" class="panel" hidden><div class="toolbar"><span id="capacity"></span><button id="new-page" class="primary">新建一页</button></div><div id="pages" class="cards"></div></section>

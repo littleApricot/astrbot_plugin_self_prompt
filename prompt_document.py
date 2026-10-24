@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import re
 
+from .nicknames import nickname_text, read_nicknames
+
 SECTIONS = {
     "persona": "性格和人设",
     "output_preferences": "回复偏好",
@@ -103,6 +105,9 @@ def ensure_layout(prompt: str) -> str:
                 "\n\n## 昵称\n<!-- self_prompt:nicknames -->\n\n"
                 "<!-- /self_prompt:nicknames -->\n\n"
             )
+        match = _section_spans(body)["nicknames"]
+        normalized = nickname_text(read_nicknames(match.group(1)))
+        body = body[: match.start(1)] + normalized + body[match.end(1) :]
         return prompt[:begin] + body + prompt[end:]
     sections = _legacy_sections(prompt)
     parts = [
@@ -112,9 +117,12 @@ def ensure_layout(prompt: str) -> str:
         START,
     ]
     for key, title in SECTIONS.items():
+        content = sections[key]
+        if key == "nicknames":
+            content = nickname_text(read_nicknames(content))
         parts.append(
             f"## {title}\n<!-- self_prompt:{key} -->\n"
-            f"{sections[key]}\n<!-- /self_prompt:{key} -->"
+            f"{content}\n<!-- /self_prompt:{key} -->"
         )
     parts.append(END)
     return "\n\n".join(parts)
@@ -161,6 +169,8 @@ def replace_section(prompt: str, section: str, content: str) -> str:
         marker in content for marker in ("<!-- self_prompt:", "<!-- /self_prompt:")
     ):
         raise ValueError("invalid_section_content")
+    if section == "nicknames":
+        content = nickname_text(read_nicknames(content))
     baseline = ensure_layout(prompt)
     begin, end, _, _ = _split_bounds(baseline)
     match = _section_spans(baseline[begin:end])[section]

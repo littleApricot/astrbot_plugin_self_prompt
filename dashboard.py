@@ -4,7 +4,7 @@ import json
 
 from astrbot.api.web import error_response, json_response, request
 
-from .core_memory import current_memory, owner_edit, render_current
+from .core_memory import current_memory, editable_bytes, owner_edit, render_current
 from .main import WRITE_CONTEXT
 from .settings import CONFIG_KEYS, Settings
 from .store import catalog_text, digest, page_stamp
@@ -99,10 +99,10 @@ class Dashboard:
                         ("notebook_catalog_max_bytes", 20000),
                     )
                 },
-                "decision_memory_bytes": len(render_current(persona.system_prompt).encode()),
-                "memory_bytes": sum(
-                    len(text.encode()) for text in memory["sections"].values()
+                "decision_memory_bytes": len(
+                    render_current(persona.system_prompt).encode()
                 ),
+                "memory_bytes": editable_bytes(persona.system_prompt),
                 "protected_bytes": len(
                     (
                         render_current(persona.system_prompt)
