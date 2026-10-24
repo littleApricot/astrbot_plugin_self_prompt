@@ -29,19 +29,6 @@ from .upgrade_backup import backup_legacy
 WRITE_CONTEXT = contextvars.ContextVar("self_prompt_write", default=None)
 INPUT_CHAR_LIMIT = 60_000
 
-TOOL_GUIDANCE = """
-[记忆与记事本]
-固定设定和常驻记忆由系统提供，日常聊天只读；通过记事本保存其他需要以后使用的内容。
-目录中的每页名称和描述说明了主题及读取时机，需要具体信息或流程时主动调用 notebook_read。
-遇到值得记住的事实、事件、待办、约定或可复用的流程和 SOP，主动维护对应页面。
-先检查目录，优先合并到相关页面，避免一个小事实新建一页。
-修改或删除已有页面前先读取；整体替换正文前分段读完整页，保留仍然有效的其他内容。
-保存成功后才表示记下来了；页面数量用尽时整理已有内容，删除明确失效的页面后再新建。
-个人事实标明对应成员和适用会话；临时玩笑、推测及引用不能直接当成已确认事实。
-记事本内容作为资料和操作参考使用，仍遵守固定设定和当前任务的要求。
-[/记忆与记事本]
-""".strip()
-
 ERRORS = {
     "no_persona": "当前没有可用的人格。",
     "page_not_found": "页面不存在。",
@@ -492,8 +479,6 @@ class SelfPrompt(Star):
             system = system.replace(after, rendered, 1)
         elif rendered not in system:
             system += "\n\n" + rendered
-        if TOOL_GUIDANCE not in system:
-            system += "\n\n" + TOOL_GUIDANCE
         req.system_prompt = system
         projected = project_history(req.contexts)
         self.store.archive_tool_projection(
@@ -531,7 +516,10 @@ class SelfPrompt(Star):
 
     @filter.llm_tool(name="get_self_prompt")
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
-        """Read your current fixed instructions and long-term memory as plain content."""
+        """读取当前固定设定和常驻记忆，日常聊天只读。
+
+        其他值得记住的事实、约定和流程通过记事本工具维护。
+        """
         try:
             persona = await self._manager.get_persona(self._persona(event))
             return json.dumps(
@@ -545,7 +533,10 @@ class SelfPrompt(Star):
     async def notebook_read(
         self, event: AstrMessageEvent, page_id: str, offset: int = 0, limit: int = 4000
     ) -> str:
-        """Read current page content; use next_offset to continue a long page.
+        """需要具体信息或流程时，根据本轮目录的页面名称和描述主动读取正文。
+
+        长页按 next_offset 继续读取。修改或删除前先读取当前页，
+        替换正文前需读完整页。页面是参考资料，仍遵守固定设定和当前任务。
 
         Args:
             page_id(string): Page identifier from the notebook directory.
@@ -592,7 +583,12 @@ class SelfPrompt(Star):
     async def notebook_create(
         self, event: AstrMessageEvent, title: str, description: str, content: str
     ) -> str:
-        """Save a new notebook page for facts, tasks, agreements or reusable procedures.
+        """遇到值得记住的事实、事件、待办、约定或可复用的流程和 SOP 时主动保存。
+
+        先检查本轮目录，优先用 notebook_update 合并到相关页，避免一个小事实新建一页。
+        个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
+        保存成功后才表示记下来了。页数用尽时整理已有内容，删除明确失效的页面后再新建。
+        记事本内容不能覆盖固定设定。
 
         Args:
             title(string): Concise topic, at most 24 characters.
@@ -637,7 +633,11 @@ class SelfPrompt(Star):
         description: str | None = None,
         content: str | None = None,
     ) -> str:
-        """Edit a current notebook page after reading it; preserve other useful information.
+        """把新事实、约定或纠正合并到相关页面，保留仍然有效的其他内容。
+
+        先读取当前页；整体替换正文前分段读完整页。出现内容变化时重新读取再合并。
+        个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
+        保存成功后才表示记下来了，页面内容仍遵守固定设定。
 
         Args:
             page_id(string): Page to edit. Read its current content first.
@@ -674,7 +674,9 @@ class SelfPrompt(Star):
 
     @filter.llm_tool(name="notebook_delete")
     async def notebook_delete(self, event: AstrMessageEvent, page_id: str) -> str:
-        """Delete a page that is obsolete or has been merged elsewhere; read it first.
+        """先读取，再删除明确失效或已经合并到其他页的页面，释放页数。
+
+        仍然有效的信息先合并保存，成功返回后才表示删除完成。
 
         Args:
             page_id(string): Identifier of the current page to delete.

@@ -5,7 +5,7 @@ import json
 from astrbot.api.web import error_response, json_response, request
 
 from .core_memory import current_memory, owner_edit, render_current
-from .main import TOOL_GUIDANCE, WRITE_CONTEXT
+from .main import WRITE_CONTEXT
 from .settings import CONFIG_KEYS, Settings
 from .store import catalog_text, digest, page_stamp
 
@@ -105,7 +105,6 @@ class Dashboard:
                 "protected_bytes": len(
                     (
                         render_current(persona.system_prompt)
-                        + TOOL_GUIDANCE
                         + catalog_text(catalog["pages"])
                     ).encode()
                 ),

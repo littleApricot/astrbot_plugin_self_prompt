@@ -82,6 +82,33 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("原文原文", request.system_prompt)
         self.assertIn("迁移记忆", request.extra_user_content_parts[0]["text"])
 
+    async def test_notebook_guidance_is_only_in_reply_tool_definitions(self):
+        await self.p.notebook_create(
+            self.s.event, "流程", "处理故障时读取", "private page body"
+        )
+        req = await self.s.prepare(self.s.message(2))
+        with patch("astrbot.core.astr_main_agent.SkillManager") as skills:
+            skills.return_value.list_skills.return_value = []
+            await _ensure_persona_and_skills(req, {}, self.s.context, self.s.event)
+        schemas = {
+            row["function"]["name"]: row["function"]
+            for row in req.func_tool.openai_schema()
+        }
+        message_text = req.system_prompt + json.dumps(
+            [req.contexts, await req.assemble_context()], ensure_ascii=False
+        )
+        for name, guidance in {
+            "notebook_read": "根据本轮目录的页面名称和描述主动读取正文",
+            "notebook_create": "遇到值得记住的事实",
+            "notebook_update": "整体替换正文前分段读完整页",
+            "notebook_delete": "释放页数",
+        }.items():
+            self.assertIn(guidance, schemas[name]["description"])
+            self.assertNotIn(guidance, message_text)
+        self.assertNotIn("[记忆与记事本]", message_text)
+        self.assertIn("流程", message_text)
+        self.assertNotIn("private page body", message_text)
+
     async def test_failed_migration_preserves_entire_original(self):
         self.s.config["notebook_max_pages"] = 1
         old = replace_section("Core", "memory", "x" * 13000)

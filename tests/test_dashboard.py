@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+from astrbot_plugin_self_prompt.core_memory import render_current
 from astrbot_plugin_self_prompt.tests.support import Sandbox, app_for
 
 
@@ -40,6 +41,12 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value["persona_id"], "default")
         self.assertEqual(value["time_zone"], "Asia/Shanghai")
         self.assertIn("stamp", value)
+        persona = await self.s.manager.get_persona("default")
+        self.assertEqual(
+            value["protected_bytes"],
+            len(render_current(persona.system_prompt).encode())
+            + value["catalog"]["catalog_bytes"],
+        )
 
     async def test_native_page_service_discovers_the_view(self):
         from astrbot.core.star.star import StarMetadata
