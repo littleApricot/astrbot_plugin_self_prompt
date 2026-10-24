@@ -136,22 +136,24 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_config_is_persisted_and_interval_can_change(self):
         response = await self.post(
-            "settings", auto_memory_message_interval=7, notebook_max_pages=9
+            "settings", memory_reminder_interval=7, notebook_max_pages=9
         )
         self.assertEqual(response.status_code, 200)
         config = json.loads(
             (self.s.root / "config.json").read_text(encoding="utf-8-sig")
         )
-        self.assertEqual(config["auto_memory_message_interval"], 7)
+        self.assertEqual(config["memory_reminder_interval"], 7)
         self.assertEqual(config["notebook_max_pages"], 9)
         self.assertEqual(
             (await self.post("settings", notebook_max_pages=0)).status_code, 409
         )
 
-    async def test_unchanged_result_has_source_and_owner_can_restore(self):
-        self.s.config["auto_memory_message_interval"] = 1
-        await self.s.plugin.collect_history(self.s.message(10, text="No new agreement"))
-        await self.s.plugin._process_ready()
+    async def test_legacy_unchanged_result_has_source_and_owner_can_restore(self):
+        original = (await self.s.manager.get_persona("default")).system_prompt
+        record_id = self.s.plugin.store.stage(
+            "default", original, original, "automatic", [{"text": "No new agreement"}]
+        )
+        self.s.plugin.store.finish(record_id)
         rows = (await self.get("records", persona_id="default")).json()["records"]
         automatic = next(row for row in rows if row["kind"] == "automatic")
         self.assertFalse(automatic["changed"])
@@ -201,9 +203,12 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 content="newname 是机器人称呼",
             )
         ).json()
-        self.s.config["auto_memory_message_interval"] = 1
-        await self.s.plugin.collect_history(self.s.message(999, text="这轮需要整理"))
-        await self.s.plugin._process_ready()
+        original = (await self.s.manager.get_persona("default")).system_prompt
+        sources = self.s.plugin.store.notebook_sources("default")
+        record_id = self.s.plugin.store.stage(
+            "default", original, original, "automatic", sources
+        )
+        self.s.plugin.store.finish(record_id)
         records = (await self.get("records", persona_id="default")).json()["records"]
         record = next(r for r in records if r["kind"] == "automatic")
         full = (

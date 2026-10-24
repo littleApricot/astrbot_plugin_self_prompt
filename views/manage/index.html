@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-  <header><div><h1>记忆与记事本</h1><p>人设和回复偏好由你维护，自动总结写入“其他”。</p></div>
+  <header><div><h1>记忆与记事本</h1><p>人设和回复偏好由你维护，机器人可维护昵称和自我认知。</p></div>
     <label>当前人格 <select id="persona" aria-label="当前人格"></select></label><button id="refresh">刷新</button></header>
   <p id="status" role="status" aria-live="polite"></p>
   <nav aria-label="管理内容"><button data-tab="memory" class="active">当前记忆</button><button data-tab="notebook">记事本</button><button data-tab="records">记忆记录</button><button data-tab="settings">配置</button></nav>
@@ -15,19 +15,18 @@
     <label>性格和人设<textarea id="character" rows="6"></textarea></label>
     <label>回复偏好<textarea id="preferences" rows="5"></textarea></label>
     <fieldset class="nickname-list"><legend>昵称</legend><div id="nicknames"></div><button id="add-nickname" type="button">添加昵称</button></fieldset>
-    <label>其他<textarea id="other" rows="7"></textarea></label>
+    <label>自我认知<textarea id="other" rows="7"></textarea></label>
     <button id="save-memory" class="primary">保存记忆</button><p id="progress" class="muted"></p>
   </section>
   <section id="notebook" class="panel" hidden><div class="toolbar"><span id="capacity"></span><button id="new-page" class="primary">新建一页</button></div><div id="pages" class="cards"></div></section>
-  <section id="records" class="panel" hidden><p class="muted">每次成功整理均保存全文和原文来源，“无变化”也保留记录。</p><div id="record-list"></div><div class="toolbar"><button id="previous">上一页</button><span id="record-offset"></span><button id="next">下一页</button></div></section>
+  <section id="records" class="panel" hidden><p class="muted">成功修改保存记忆快照。旧版整理记录及其原文来源继续保留。</p><div id="record-list"></div><div class="toolbar"><button id="previous">上一页</button><span id="record-offset"></span><button id="next">下一页</button></div></section>
   <section id="settings" class="panel" hidden>
-    <label class="check"><input id="auto-enabled" type="checkbox">自动整理“其他”</label>
-    <label>每累计多少条新消息整理一次<input id="interval" type="number" min="1"></label>
-    <p class="muted">用户消息和机器人最终回复分别计数；未回复的用户消息也计数。</p>
+    <label class="check"><input id="auto-enabled" type="checkbox">启用记忆维护提醒</label>
+    <label>连续多少轮未修改时提醒一次<input id="interval" type="number" min="1"></label>
+    <p class="muted">按机器人进入正式回复流程的轮次累计，工具往返和判断后沉默不计。提醒后清零；昵称或自我认知实际保存变化后也清零。</p>
     <label>每个人格的记事本页数上限<input id="max-pages" type="number" min="1"></label>
     <details><summary>高级配置</summary>
-      <label>单次整理超时（秒）<input id="timeout" type="number" min="1"></label>
-      <label>昵称和其他内容字节上限<input id="memory-bytes" type="number" min="1"></label>
+      <label>昵称和自我认知字节上限<input id="memory-bytes" type="number" min="1"></label>
       <label>完整目录字节上限<input id="catalog-bytes" type="number" min="1"></label>
     </details><button id="save-settings" class="primary">保存配置</button>
   </section>

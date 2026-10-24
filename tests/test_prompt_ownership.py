@@ -57,7 +57,7 @@ class PromptOwnershipTests(unittest.TestCase):
         self.assertNotIn(FIXED_START, upgraded)
         self.assertEqual(ensure_layout(upgraded), upgraded)
 
-    def test_automatic_and_nickname_writers_have_distinct_exact_boundaries(self):
+    def test_self_memory_and_nickname_writers_have_distinct_exact_boundaries(self):
         original = (
             "External prefix\n"
             + ensure_layout("Owner persona  \n")

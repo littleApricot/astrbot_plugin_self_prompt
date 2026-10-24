@@ -114,7 +114,7 @@ class StoreTests(unittest.TestCase):
 
     def test_invalid_settings_do_not_become_unlimited(self):
         for key in (
-            "auto_memory_message_interval",
+            "memory_reminder_interval",
             "notebook_max_pages",
             "long_term_memory_max_bytes",
             "notebook_catalog_max_bytes",

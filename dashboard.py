@@ -91,10 +91,9 @@ class Dashboard:
                 "settings": {
                     key: self.plugin.config.get(key, default)
                     for key, default in (
-                        ("auto_memory_enabled", True),
-                        ("auto_memory_message_interval", 100),
+                        ("memory_reminder_enabled", True),
+                        ("memory_reminder_interval", 100),
                         ("notebook_max_pages", 100),
-                        ("auto_memory_timeout", 60),
                         ("long_term_memory_max_bytes", 8000),
                         ("notebook_catalog_max_bytes", 20000),
                     )
@@ -287,8 +286,6 @@ class Dashboard:
                 self.plugin.config.clear()
                 self.plugin.config.update(previous)
                 raise
-            if limits.enabled:
-                self.plugin._start_worker()
             return {"ok": True}
 
         return await self._run(operation)

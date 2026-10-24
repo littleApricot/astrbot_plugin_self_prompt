@@ -1,11 +1,10 @@
-"""Specify legacy migration and source acknowledgement for other-only summaries."""
+"""Specify legacy migration and protected self-memory writes."""
 
 import json
 from unittest.mock import AsyncMock
 
 import pytest
 
-from astrbot_plugin_self_prompt.auto_memory import apply_summary
 from astrbot_plugin_self_prompt.core_memory import current_memory, render_current
 from astrbot_plugin_self_prompt.main import WRITE_CONTEXT
 from astrbot_plugin_self_prompt.prompt_document import (
@@ -41,7 +40,7 @@ def test_old_layout_keeps_all_content_in_four_current_sections():
     assert "固定设定" not in rendered and "# 长期记忆" not in rendered
     assert all(
         "## " + title in rendered
-        for title in ("性格和人设", "回复偏好", "昵称", "其他")
+        for title in ("性格和人设", "回复偏好", "昵称", "自我认知")
     )
 
 
@@ -67,12 +66,12 @@ async def test_upgrading_keeps_notebook_and_exact_original_backup():
 
 
 @pytest.mark.asyncio
-async def test_save_guard_rejects_protected_automatic_changes_even_outside_parser():
+async def test_save_guard_rejects_protected_memory_tool_changes():
     s = await Sandbox().open()
     try:
         original = (await s.manager.get_persona("default")).system_prompt
         for key in ("persona", "output_preferences", "nicknames"):
-            token = WRITE_CONTEXT.set({"kind": "automatic", "expected": original})
+            token = WRITE_CONTEXT.set({"kind": "memory_tool", "expected": original})
             try:
                 with pytest.raises(ValueError, match="protected_sections_modified"):
                     await s.manager.update_persona(
@@ -90,17 +89,13 @@ async def test_save_guard_rejects_protected_automatic_changes_even_outside_parse
 async def test_interrupted_other_save_retains_sources_until_recovery():
     s = await Sandbox().open()
     try:
-        s.config["auto_memory_message_interval"] = 1
-        s.provider.text = json.dumps(
-            {"updates": {"other": "已确认的约定"}}, ensure_ascii=False
-        )
-        await s.plugin.collect_history(s.message(10, "请记住这件事"))
         original_save = s.plugin._original_update
         s.plugin._original_update = AsyncMock(
             side_effect=OSError("isolated interruption")
         )
-        await s.plugin._process_ready()
-        assert s.plugin.store.pending_count() == 1
+        result = json.loads(await s.plugin.self_memory_update(s.event, "已确认的约定"))
+        assert not result["ok"]
+        assert s.plugin.store.prepared("default")
         s.plugin._original_update = original_save
         await s.plugin._recover("default")
         assert (
@@ -109,6 +104,6 @@ async def test_interrupted_other_save_retains_sources_until_recovery():
             ]
             == "已确认的约定"
         )
-        assert s.plugin.store.pending_count() == 0
+        assert not s.plugin.store.prepared("default")
     finally:
         await s.close()

@@ -1,15 +1,15 @@
 {
-  "auto_memory_enabled": {
+  "memory_reminder_enabled": {
     "type": "bool",
-    "description": "自动整理其他记忆",
+    "description": "启用记忆维护提醒",
     "default": true,
-    "hint": "每个会话、每个人格分别累计消息，使用该会话的回复模型，只更新“其他”；性格和人设、回复偏好及昵称列表保持原样。"
+    "hint": "按机器人进入正式回复流程的轮次计数，判断后沉默和工具往返不计；提醒只进入本轮临时上下文。"
   },
-  "auto_memory_message_interval": {
+  "memory_reminder_interval": {
     "type": "int",
-    "description": "每累计多少条新消息整理一次",
+    "description": "连续多少轮未修改时提醒一次",
     "default": 100,
-    "hint": "用户消息和机器人最终回复分别计数，未回复的消息也计数；各会话、人格分别累计。"
+    "hint": "昵称或自我认知实际保存变化后清零；达到轮数并加入提醒后也清零，之后重新累计。"
   },
   "notebook_max_pages": {
     "type": "int",
@@ -17,16 +17,11 @@
     "default": 100,
     "hint": "页数达到上限后仍可编辑和删除；降低上限不自动删除已有页面。"
   },
-  "auto_memory_timeout": {
-    "type": "int",
-    "description": "每次记忆整理模型调用超时秒数",
-    "default": 60
-  },
   "long_term_memory_max_bytes": {
     "type": "int",
-    "description": "昵称和其他内容字节上限",
+    "description": "昵称和自我认知字节上限",
     "default": 8000,
-    "hint": "按 UTF-8 字节统计昵称和其他，不包含性格和人设、回复偏好。超额的已有内容保留，自动总结和昵称工具更新需要符合预算。"
+    "hint": "按 UTF-8 字节统计昵称和自我认知，不包含性格和人设、回复偏好。已有超额内容保留，模型工具的新修改需要符合预算。"
   },
   "notebook_catalog_max_bytes": {
     "type": "int",

@@ -1,13 +1,11 @@
 """Exercise the new plugin against native persona persistence and request objects."""
 
-import asyncio
 import copy
 import json
 import unittest
 from unittest.mock import patch
 
 from astrbot.core.astr_main_agent import _ensure_persona_and_skills
-from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_self_prompt.core_memory import (
     current_memory,
@@ -36,6 +34,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         for name in (
             "get_self_prompt",
             "nickname_update",
+            "self_memory_update",
             "notebook_read",
             "notebook_create",
             "notebook_update",
@@ -193,93 +192,6 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )["ok"]
         )
 
-    async def collect(self, count, start=0, origin="test:GroupMessage:room"):
-        for number in range(start, start + count):
-            await self.p.collect_history(self.s.message(number, origin=origin))
-
-    async def test_configurable_batch_updates_and_preserves_sources(self):
-        self.s.config["auto_memory_message_interval"] = 3
-        self.s.provider.text = '{"updates":{"other":"Remembered agreement"}}'
-        await self.collect(2)
-        await self.p._process_ready()
-        self.assertEqual(len(self.s.provider.calls), 0)
-        await self.collect(1, 2)
-        await self.p._process_ready()
-        self.assertEqual(len(self.s.provider.calls), 1)
-        self.assertEqual(self.p.store.pending_count(), 0)
-        rows = self.p.store.records("default")
-        automatic = next(row for row in rows if row["kind"] == "automatic")
-        record = self.p.store.record("default", automatic["id"])
-        self.assertTrue(record["changed"])
-        self.assertEqual(
-            [row["text"] for row in record["sources"]],
-            ["message 0", "message 1", "message 2"],
-        )
-        self.assertEqual(
-            read_sections((await self.s.manager.get_persona("default")).system_prompt)[
-                "other"
-            ],
-            "Remembered agreement",
-        )
-        payload = self.s.provider.calls[0]
-        self.assertNotIn("revision", payload["prompt"])
-        self.assertNotIn("版本", payload["system_prompt"])
-        with self.p.store._connect() as db:
-            rows = db.execute("SELECT payload FROM messages WHERE done=1").fetchall()
-            self.assertEqual(len(rows), 3)
-            self.assertTrue(all(row[0] != "{}" for row in rows))
-
-    async def test_unchanged_batch_has_its_own_sources_and_log(self):
-        self.s.config["auto_memory_message_interval"] = 2
-        before = (await self.s.manager.get_persona("default")).system_prompt
-        await self.collect(2)
-        await self.p._process_ready()
-        await self.collect(2, 2)
-        await self.p._process_ready()
-        records = [
-            self.p.store.record("default", row["id"])
-            for row in self.p.store.records("default")
-            if row["kind"] == "automatic"
-        ]
-        self.assertEqual(len(records), 2)
-        self.assertTrue(
-            all(not row["changed"] and row["state"] == "committed" for row in records)
-        )
-        self.assertEqual(
-            [source["text"] for source in records[0]["sources"]],
-            ["message 2", "message 3"],
-        )
-        self.assertEqual(
-            (await self.s.manager.get_persona("default")).system_prompt, before
-        )
-
-    async def test_unchanged_over_budget_memory_still_records_sources(self):
-        current = (await self.s.manager.get_persona("default")).system_prompt
-        await self.s.manager.update_persona(
-            "default", system_prompt=replace_section(current, "other", "x" * 8100)
-        )
-        self.s.config["auto_memory_message_interval"] = 1
-        await self.collect(1)
-        await self.p._process_ready()
-        self.assertEqual(self.p.store.pending_count(), 0)
-        row = next(
-            row for row in self.p.store.records("default") if row["kind"] == "automatic"
-        )
-        self.assertFalse(row["changed"])
-        self.assertEqual(row["state"], "committed")
-
-    async def test_background_worker_processes_wakeup(self):
-        self.s.config["auto_memory_message_interval"] = 1
-        await self.collect(1)
-        SelfPrompt._start_worker(self.p)
-
-        async def wait():
-            while self.p.store.pending_count():
-                await asyncio.sleep(0.01)
-
-        await asyncio.wait_for(wait(), 2)
-        self.assertEqual(len(self.s.provider.calls), 1)
-
     async def test_create_after_delete_and_after_change_is_not_stale_cached_success(
         self,
     ):
@@ -355,72 +267,6 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["kind"], "external")
         self.assertTrue(row["changed"])
 
-    async def test_silent_messages_and_completed_replies_count_once(self):
-        self.s.config["auto_memory_message_interval"] = 4
-        for number in range(2):
-            event = self.s.message(number)
-            await self.p.collect_history(event)
-            await self.p.collect_history(event)
-            response = LLMResponse("assistant", completion_text="final")
-            await self.p.collect_reply(
-                event,
-                LLMResponse("assistant", completion_text="plan", tools_call_name=["x"]),
-            )
-            await self.p.collect_reply(event, response)
-            await self.p.collect_reply(event, response)
-        await self.p._process_ready()
-        self.assertEqual(len(self.s.provider.calls), 1)
-        history = json.loads(self.s.provider.calls[0]["prompt"])["history"]
-        self.assertEqual(
-            [row["role"] for row in history], ["user", "assistant", "user", "assistant"]
-        )
-        await self.p.collect_history(self.s.message(0))
-        self.assertEqual(self.p.store.pending_count(), 0)
-
-    async def test_manual_save_during_consolidation_wins(self):
-        self.s.config["auto_memory_message_interval"] = 1
-
-        async def intervene(**kwargs):
-            original = (await self.s.manager.get_persona("default")).system_prompt
-            updated = replace_section(original, "persona", "Owner says this")
-            await self.s.manager.update_persona("default", system_prompt=updated)
-            return LLMResponse(
-                "assistant", completion_text='{"updates":{"other":"Stale result"}}'
-            )
-
-        self.s.provider.text = intervene
-        await self.collect(1)
-        await self.p._process_ready()
-        self.assertEqual(
-            read_sections((await self.s.manager.get_persona("default")).system_prompt)[
-                "persona"
-            ],
-            "Owner says this",
-        )
-        self.assertEqual(self.p.store.pending_count(), 1)
-        self.assertTrue(
-            any(row["state"] == "failed" for row in self.p.store.records("default"))
-        )
-
-    async def test_disallowed_or_oversized_update_cannot_advance_queue(self):
-        self.s.config["auto_memory_message_interval"] = 1
-        original = (await self.s.manager.get_persona("default")).system_prompt
-        await self.collect(1)
-        for text in (
-            '{"updates":{"memory":"not allowed"}}',
-            '{"updates":{"persona":"not allowed"}}',
-            '{"updates":{"output_preferences":"not allowed"}}',
-            '{"updates":{"nicknames":["not allowed"]}}',
-            json.dumps({"updates": {"other": "x" * 8001}}),
-        ):
-            self.s.provider.text = text
-            self.p._retry_after.clear()
-            await self.p._process_ready()
-            self.assertEqual(self.p.store.pending_count(), 1)
-            self.assertEqual(
-                (await self.s.manager.get_persona("default")).system_prompt, original
-            )
-
     async def test_native_editor_saves_each_snapshot_and_keeps_preferences(self):
         original = (await self.s.manager.get_persona("default")).system_prompt
         first = owner_edit(
@@ -452,30 +298,6 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Exact preference  \n",
         )
         self.assertTrue(all(row["sources"] == [] for row in manual))
-
-    async def test_prepared_write_recovers_and_acknowledges_exact_batch(self):
-        self.s.config["auto_memory_message_interval"] = 2
-        await self.collect(3)
-        original = (await self.s.manager.get_persona("default")).system_prompt
-        target = replace_section(original, "other", "Recovered")
-        scope = self.p.store.ready(2)[0]
-        records = self.p.store.batch(scope["id"], 2)
-        record_id = self.p.store.stage(
-            "default",
-            original,
-            target,
-            "automatic",
-            records,
-            scope["id"],
-            records[-1]["id"],
-        )
-        await self.p._original_update("default", system_prompt=target)
-        await self.p._recover("default")
-        await self.p._recover("default")
-        self.assertEqual(self.p.store.pending_count(), 1)
-        self.assertEqual(
-            self.p.store.record("default", record_id)["state"], "committed"
-        )
 
     async def test_legacy_history_projection_preserves_original_and_other_tools(self):
         content = json.dumps(
@@ -510,7 +332,12 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history, before)
 
     async def test_reload_restores_editor_hook_and_preserves_pending(self):
-        await self.collect(1)
+        self.p.store.append(
+            self.s.event.unified_msg_origin,
+            "default",
+            "legacy-1",
+            {"text": "old source"},
+        )
         await self.p.terminate()
         self.assertIs(self.s.manager.update_persona, self.p._original_update)
         with patch(
@@ -521,98 +348,3 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await other._ensure_layout("default")
         self.assertEqual(other.store.pending_count(), 1)
         await other.terminate()
-
-    async def test_consolidation_reads_notebook_and_retains_original_sources(self):
-        self.s.config["auto_memory_message_interval"] = 2
-        page = self.p.store.create_page(
-            "default",
-            "称呼线索",
-            "理解对话对象",
-            "群友把机器人叫作新绰号，lljy 表示柳浪家园。",
-            self.p.settings(),
-        )
-        await self.collect(2)
-        before = (await self.s.manager.get_persona("default")).system_prompt
-        other = read_sections(before)["other"] + "\n成员甲确认了明日的约定。"
-        self.s.provider.text = json.dumps(
-            {"updates": {"other": other}}, ensure_ascii=False
-        )
-        await self.p._process_ready()
-        payload = json.loads(self.s.provider.calls[0]["prompt"])
-        notes = [r for r in payload["history"] if r.get("source_type") == "notebook"]
-        self.assertEqual(len(notes), 1)
-        self.assertIn("新绰号", notes[0]["text"])
-        self.assertNotIn("page_stamp", notes[0])
-        actual = (await self.s.manager.get_persona("default")).system_prompt
-        self.assertIn("明日的约定", read_sections(actual)["other"])
-        self.assertEqual(
-            read_sections(actual)["persona"], read_sections(before)["persona"]
-        )
-        automatic = next(
-            r for r in self.p.store.records("default") if r["kind"] == "automatic"
-        )
-        sources = self.p.store.record("default", automatic["id"])["sources"]
-        self.assertEqual(len(sources), 3)
-        full = self.p.store.page("default", page["page_id"])
-        from astrbot_plugin_self_prompt.store import page_stamp
-
-        self.p.store.change_page(
-            "default",
-            page["page_id"],
-            page_stamp(full),
-            {},
-            self.p.settings(),
-            delete=True,
-        )
-        self.assertEqual(
-            self.p.store.record("default", automatic["id"])["sources"][-1]["text"],
-            notes[0]["text"],
-        )
-        self.assertEqual(self.p.store.notebook_sources("default"), [])
-        self.assertEqual(self.p.store.pending_count(), 0)
-
-    async def test_unchanged_notebook_is_not_reread_and_edits_are_retried_after_failure(
-        self,
-    ):
-        from astrbot_plugin_self_prompt.store import page_stamp
-
-        self.s.config["auto_memory_message_interval"] = 1
-        page = self.p.store.create_page(
-            "default", "术语", "含义", "old term", self.p.settings()
-        )
-        await self.collect(1)
-        await self.p._process_ready()
-        self.assertEqual(self.p.store.notebook_sources("default"), [])
-        await self.collect(1, 1)
-        await self.p._process_ready()
-        self.assertFalse(
-            any(
-                r.get("source_type") == "notebook"
-                for r in json.loads(self.s.provider.calls[-1]["prompt"])["history"]
-            )
-        )
-        full = self.p.store.page("default", page["page_id"])
-        self.p.store.change_page(
-            "default",
-            page["page_id"],
-            page_stamp(full),
-            {"content": "new term"},
-            self.p.settings(),
-        )
-        self.s.provider.text = "invalid result"
-        await self.collect(1, 2)
-        await self.p._process_ready()
-        self.assertEqual(self.p.store.pending_count(), 1)
-        self.assertEqual(
-            self.p.store.notebook_sources("default")[0]["text"], "new term"
-        )
-        self.s.provider.text = '{"updates":{}}'
-        self.p._retry_after.clear()
-        await self.p._process_ready()
-        self.assertEqual(self.p.store.notebook_sources("default"), [])
-        record = next(
-            r for r in self.p.store.records("default") if r["kind"] == "automatic"
-        )
-        saved = self.p.store.record("default", record["id"])
-        self.assertFalse(saved["changed"])
-        self.assertEqual(saved["sources"][-1]["text"], "new term")

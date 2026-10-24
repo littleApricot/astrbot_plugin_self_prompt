@@ -11,7 +11,7 @@ SECTIONS = {
     "persona": "性格和人设",
     "output_preferences": "回复偏好",
     "nicknames": "昵称",
-    "other": "其他",
+    "other": "自我认知",
 }
 START = "<!-- self_prompt:document:v3 -->"
 END = "<!-- /self_prompt:document:v3 -->"
@@ -88,10 +88,15 @@ def ensure_layout(prompt: str) -> str:
         if len(MARKERS.findall(prompt)) != 2 * (len(SECTIONS) + 1):
             raise ValueError("unexpected_section_markers")
         match = spans["nicknames"]
-        return (
+        layout = (
             prompt[: begin + match.start(1)]
             + nickname_text(read_nicknames(match.group(1)))
             + prompt[begin + match.end(1) :]
+        )
+        return layout.replace(
+            "## 其他\n<!-- self_prompt:other -->",
+            "## 自我认知\n<!-- self_prompt:other -->",
+            1,
         )
     if any(marker in prompt for marker in (V2_START, V2_END, FIXED_START, FIXED_END)):
         begin, end = _bounds(prompt, V2_START, V2_END)

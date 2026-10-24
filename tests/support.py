@@ -108,8 +108,6 @@ class Sandbox:
             return_value=self.data,
         ):
             self.plugin = SelfPrompt(self.context, self.config)
-        self.no_worker = patch.object(self.plugin, "_start_worker")
-        self.no_worker.start()
         await self.plugin.initialize()
         self.event = self.message(1)
         self.request = await self.prepare(self.event)
@@ -142,7 +140,6 @@ class Sandbox:
 
     async def close(self):
         await self.plugin.terminate()
-        self.no_worker.stop()
         self.preference_patch.stop()
         await self.db.engine.dispose()
         self.temp.cleanup()

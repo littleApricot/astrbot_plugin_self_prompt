@@ -7,7 +7,6 @@ from unittest.mock import patch
 import httpx
 import pytest
 from astrbot.core.provider.register import llm_tools
-from astrbot_plugin_self_prompt.auto_memory import apply_summary
 from astrbot_plugin_self_prompt.core_memory import current_memory, owner_edit
 from astrbot_plugin_self_prompt.main import WRITE_CONTEXT
 from astrbot_plugin_self_prompt.prompt_document import (
@@ -199,7 +198,7 @@ async def test_concurrent_deltas_preserve_both_changes_and_budget_failure_keeps_
 
 
 @pytest.mark.asyncio
-async def test_dashboard_nickname_list_is_read_only_to_background_consolidation():
+async def test_dashboard_nickname_list_is_protected_from_self_memory_tool():
     s = await Sandbox().open()
     try:
         async with httpx.AsyncClient(
@@ -229,13 +228,11 @@ async def test_dashboard_nickname_list_is_read_only_to_background_consolidation(
                 "成员甲：阿甲",
             ]
         owner = state["memory"]["sections"]["persona"]
-        s.config["auto_memory_message_interval"] = 1
-        s.provider.text = json.dumps(
-            {"updates": {"other": "一条已确认的约定"}},
-            ensure_ascii=False,
+        await s.plugin.get_self_prompt(s.event)
+        changed = json.loads(
+            await s.plugin.self_memory_update(s.event, "一条已确认的约定")
         )
-        await s.plugin.collect_history(s.message(20, "成员乙明确约定昵称小乙"))
-        await s.plugin._process_ready()
+        assert changed["ok"]
         actual = (await s.manager.get_persona("default")).system_prompt
         assert read_sections(actual)["persona"] == owner
         assert read_sections(actual)["other"] == "一条已确认的约定"
@@ -243,23 +240,5 @@ async def test_dashboard_nickname_list_is_read_only_to_background_consolidation(
             "机器人：小蓝",
             "成员甲：阿甲",
         ]
-        model_input = s.provider.calls[0]["prompt"]
-        assert isinstance(json.loads(model_input)["sections"]["nicknames"], list)
     finally:
         await s.close()
-
-
-def test_summary_rejects_nickname_updates_and_old_transfer_contract():
-    original = configured(["机器人：小蓝", "旧黑话表示暂停", "成员甲：阿甲"])
-    with pytest.raises(ValueError, match="invalid_summary"):
-        apply_summary(
-            original,
-            json.dumps(
-                {
-                    "updates": {},
-                    "notebook_transfers": [{"section": "nicknames", "text": "旧黑话"}],
-                }
-            ),
-        )
-    with pytest.raises(ValueError, match="invalid_sections"):
-        apply_summary(original, '{"updates":{"nicknames":[]}}')

@@ -5,17 +5,15 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-import time
 import uuid
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from sys import maxsize
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.provider import LLMResponse, ProviderRequest
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.agent.message import TextPart
 
-from .auto_memory import SUMMARY_PROMPT, apply_summary, history_chunks
 from .core_memory import current_memory, editable_bytes, project_history, render_current
 from .nicknames import nickname_text, read_nicknames, validate_nicknames
 from .prompt_document import (
@@ -29,7 +27,7 @@ from .store import Store, catalog_text, digest, page_stamp
 from .upgrade_backup import backup_legacy
 
 WRITE_CONTEXT = contextvars.ContextVar("self_prompt_write", default=None)
-INPUT_CHAR_LIMIT = 60_000
+MEMORY_REMINDER = "你已经很久没有更新昵称和自我认知了。看看最近的消息，有没有值得更新的内容；如果有，先更新再回复，没有就正常回复。"
 
 ERRORS = {
     "no_persona": "当前没有可用的人格。",
@@ -47,6 +45,7 @@ ERRORS = {
     "content_changed": "内容已变化，请重新读取后重试。",
     "memory_budget_exceeded": "常驻内容已超过字节上限，请精简后重试。",
     "protected_sections_modified": "此操作超出允许修改的分区。",
+    "invalid_section_content": "自我认知必须是正文，不能包含分区定位标记。",
 }
 
 
@@ -60,11 +59,7 @@ class SelfPrompt(Star):
         self._data.mkdir(parents=True, exist_ok=True)
         backup_legacy(self._data, self.config)
         self.store = Store(self._data / "auto_memory.sqlite3")
-        self.memory_queue = self.store
         self._locks = {}
-        self._wake = asyncio.Event()
-        self._worker = None
-        self._retry_after = {}
         self._active = True
         self._manager = context.persona_manager
         self._original_update = self._manager.update_persona
@@ -74,6 +69,7 @@ class SelfPrompt(Star):
         for name, required in {
             "get_self_prompt": [],
             "nickname_update": [],
+            "self_memory_update": ["content"],
             "notebook_read": ["page_id"],
             "notebook_create": ["title", "description", "content"],
             "notebook_update": ["page_id"],
@@ -106,6 +102,19 @@ class SelfPrompt(Star):
     def settings(self):
         return Settings.read(self.config)
 
+    def _temporary_context(self, event):
+        persona_id = event.get_extra("self_prompt_persona_id")
+        if not persona_id:
+            return ""
+        directory = catalog_text(
+            self.store.catalog(persona_id, self.settings())["pages"]
+        )
+        return "\n\n".join(
+            text
+            for text in (directory, event.get_extra("self_prompt_memory_reminder", ""))
+            if text
+        )
+
     def _lcm_managed(self):
         lookup = getattr(self.context, "get_registered_star", None)
         star = lookup("astrbot_plugin_lcm") if callable(lookup) else None
@@ -118,21 +127,14 @@ class SelfPrompt(Star):
         )
 
     def lcm_context_rules(self):
-        def catalog(event):
-            persona_id = event.get_extra("self_prompt_persona_id")
-            return (
-                catalog_text(self.store.catalog(persona_id, self.settings())["pages"])
-                if persona_id
-                else ""
-            )
-
         return {
             "owner": "astrbot_plugin_self_prompt",
             "system": lambda event: event.get_extra("self_prompt_system_text", ""),
-            "temporary": catalog,
+            "temporary": self._temporary_context,
             "history_tools": {
                 "get_self_prompt": "keep",
                 "nickname_update": "keep",
+                "self_memory_update": "keep",
                 "notebook_read": "keep",
                 "notebook_create": "keep",
                 "notebook_update": "keep",
@@ -162,15 +164,17 @@ class SelfPrompt(Star):
             current = await self._manager.get_persona(persona_id)
             original = current.system_prompt
             meta = WRITE_CONTEXT.get() or {"kind": "manual"}
+            if meta["kind"] == "automatic":
+                raise ValueError("automatic_summary_removed")
             if "expected" in meta and original != meta["expected"]:
                 raise ValueError("content_changed")
             target = ensure_layout(requested)
             if meta["kind"] == "nickname_tool":
                 assert_editable_change(original, target, allowed=("nicknames",))
-            elif meta["kind"] == "automatic":
+            elif meta["kind"] == "memory_tool":
                 assert_editable_change(original, target, allowed=("other",))
             limits = self.settings()
-            if meta["kind"] in {"automatic", "nickname_tool"}:
+            if meta["kind"] in {"nickname_tool", "memory_tool"}:
                 size = editable_bytes(target)
                 if target != original and size > limits.memory_bytes:
                     raise ValueError("memory_budget_exceeded")
@@ -193,11 +197,7 @@ class SelfPrompt(Star):
             else:
                 kwargs["system_prompt"] = target
             # Leave the prepared record intact if a save or readback is interrupted.
-            saved = (
-                current
-                if meta["kind"] == "automatic" and target == original
-                else await self._original_update(persona_id, *arguments, **kwargs)
-            )
+            saved = await self._original_update(persona_id, *arguments, **kwargs)
             actual = await self._manager.get_persona(persona_id)
             if saved is None or actual.system_prompt != target:
                 raise ValueError("save_not_confirmed")
@@ -211,10 +211,13 @@ class SelfPrompt(Star):
                 if persona.system_prompt == record["content"]:
                     self.store.finish(record["id"])
                 elif persona.system_prompt == record["original"]:
-                    if record["kind"] in {"automatic", "nickname_tool"}:
+                    if record["kind"] == "automatic":
+                        self.store.fail(record["id"], "automatic_summary_removed")
+                        continue
+                    if record["kind"] in {"nickname_tool", "memory_tool"}:
                         allowed = (
                             ("other",)
-                            if record["kind"] == "automatic"
+                            if record["kind"] == "memory_tool"
                             else ("nicknames",)
                         )
                         try:
@@ -267,13 +270,6 @@ class SelfPrompt(Star):
                     self.store.import_backup(persona.persona_id, text, path.name)
             except Exception as exc:
                 self.logger.warning("记忆迁移失败：%s", type(exc).__name__)
-        if self.settings().enabled:
-            self._start_worker()
-
-    def _start_worker(self):
-        if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._process_queue())
-        self._wake.set()
 
     async def _selected_persona(self, event, conversation=None):
         if conversation is None:
@@ -293,241 +289,8 @@ class SelfPrompt(Star):
         )
         return persona_id if persona is not None else None
 
-    def _append_history(self, event, persona_id, role, text):
-        if not text.strip():
-            return
-        message_id = event.get_extra("self_prompt_message_id")
-        if not message_id:
-            message_id = str(
-                getattr(event.message_obj, "message_id", "") or uuid.uuid4()
-            )
-            event.set_extra("self_prompt_message_id", message_id)
-        message = getattr(event, "message_obj", None)
-        raw_time = getattr(message, "timestamp", None) if role == "user" else None
-        timestamp = (
-            datetime.fromtimestamp(raw_time, timezone.utc).isoformat()
-            if isinstance(raw_time, (int, float))
-            else datetime.now(timezone.utc).isoformat()
-        )
-        parts = []
-        if role == "user" and hasattr(event, "get_messages"):
-            for part in event.get_messages():
-                try:
-                    value = part.model_dump(mode="json", exclude_none=True)
-                    # Do not embed binary data in source records.
-                    value = {
-                        key: val
-                        for key, val in value.items()
-                        if key not in {"base64", "data"}
-                    }
-                    parts.append(value)
-                except (AttributeError, TypeError, ValueError):
-                    parts.append({"type": str(getattr(part, "type", "unknown"))})
-        self.store.append(
-            event.unified_msg_origin,
-            persona_id,
-            f"{message_id}:{role}",
-            {
-                "role": role,
-                "message_id": message_id,
-                "origin": event.unified_msg_origin,
-                "sender_id": event.get_sender_id()
-                if role == "user"
-                else event.get_self_id(),
-                "sender_name": event.get_sender_name() if role == "user" else "bot",
-                "time": timestamp,
-                "text": text,
-                "parts": parts,
-            },
-            str(event.get_extra("selected_provider", "") or ""),
-            event.get_extra("self_prompt_model"),
-        )
-        self._start_worker()
-
-    @filter.event_message_type(
-        filter.EventMessageType.GROUP_MESSAGE | filter.EventMessageType.PRIVATE_MESSAGE,
-        priority=90_000,
-    )
-    async def collect_history(self, event: AstrMessageEvent):
-        """Capture original messages even when the reply gate remains silent."""
-        if not self.settings().enabled or event.get_sender_id() == event.get_self_id():
-            return
-        try:
-            persona_id = await self._selected_persona(event)
-            if persona_id:
-                event.set_extra("self_prompt_persona_id", persona_id)
-                self._append_history(
-                    event, persona_id, "user", event.get_message_outline()
-                )
-        except Exception as exc:
-            self.logger.warning("记忆整理原文收集失败：%s", type(exc).__name__)
-
-    @filter.on_llm_response()
-    async def collect_reply(self, event: AstrMessageEvent, response: LLMResponse):
-        """Count completed assistant output once, excluding tool calls and chunks."""
-        if not self.settings().enabled:
-            return
-        if (
-            response.role != "assistant"
-            or response.is_chunk
-            or response.tools_call_name
-        ):
-            return
-        text = response.completion_text or ""
-        if response.result_chain:
-            media = [
-                f"[{part.type.value}]"
-                for part in response.result_chain.chain
-                if part.type.value != "Plain"
-            ]
-            text = " ".join(value for value in [text, *media] if value)
-        persona_id = event.get_extra("self_prompt_persona_id")
-        if persona_id:
-            self._append_history(event, persona_id, "assistant", text)
-
-    async def _process_queue(self):
-        while True:
-            await self._wake.wait()
-            self._wake.clear()
-            try:
-                await self._process_ready()
-            except Exception as exc:
-                self.logger.warning("记忆整理队列处理失败：%s", type(exc).__name__)
-
-    async def _process_ready(self):
-        while self.settings().enabled:
-            progressed = False
-            for scope in self.store.ready(self.settings().interval):
-                if self._retry_after.get(scope["id"], 0) > time.monotonic():
-                    continue
-                try:
-                    await self._summarize(scope)
-                    self._retry_after.pop(scope["id"], None)
-                    progressed = True
-                except Exception as exc:
-                    self._retry_after[scope["id"]] = time.monotonic() + 60
-                    self.logger.warning("自动记忆整理失败：%s", type(exc).__name__)
-            if not progressed:
-                return
-
-    async def _summarize(self, scope):
-        limits = self.settings()
-        persona_id = scope["persona_id"]
-        await self._ensure_layout(persona_id)
-        records = self.store.batch(scope["id"], limits.interval)
-        if len(records) < limits.interval:
-            return
-        sources = [*records, *self.store.notebook_sources(persona_id)]
-        original = (await self._manager.get_persona(persona_id)).system_prompt
-        staged = original
-        provider = (
-            self.context.get_provider_by_id(scope["provider_id"])
-            if scope["provider_id"]
-            else await self.context.get_using_provider_async(scope["origin"])
-        )
-        if provider is None:
-            raise ValueError("model_not_configured")
-        # Media references are retained for the owner, but only text went to this model.
-        inputs = [
-            {
-                key: value
-                for key, value in row.items()
-                if key not in {"parts", "page_stamp"}
-            }
-            for row in sources
-        ]
-        zone = ZoneInfo(
-            self.context.get_config(umo=scope["origin"]).get(
-                "timezone", "Asia/Shanghai"
-            )
-            or "Asia/Shanghai"
-        )
-        for row in inputs:
-            if row.get("time"):
-                row["time"] = (
-                    datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
-                    .astimezone(zone)
-                    .strftime("%Y-%m-%d %H:%M:%S")
-                )
-        pending = [inputs]
-        try:
-            while pending:
-                header = current_memory(staged)
-                overhead = (
-                    len(json.dumps(header, ensure_ascii=False))
-                    + len(SUMMARY_PROMPT)
-                    + 1000
-                )
-                history, *remaining = history_chunks(
-                    pending.pop(0), INPUT_CHAR_LIMIT - overhead
-                )
-                pending = [*remaining, *pending]
-                response = await asyncio.wait_for(
-                    provider.text_chat(
-                        prompt=json.dumps(
-                            {**header, "history": history}, ensure_ascii=False
-                        ),
-                        system_prompt=SUMMARY_PROMPT,
-                        contexts=[],
-                        func_tool=None,
-                        **({"model": scope["model"]} if scope["model"] else {}),
-                    ),
-                    timeout=limits.timeout,
-                )
-                if response.role != "assistant" or response.tools_call_name:
-                    raise ValueError("invalid_model_response")
-                staged = apply_summary(staged, response.completion_text)
-            if not self.settings().enabled:
-                return
-            token = WRITE_CONTEXT.set(
-                {
-                    "kind": "automatic",
-                    "expected": original,
-                    "sources": sources,
-                    "scope": scope["id"],
-                    "last_id": records[-1]["id"],
-                }
-            )
-            try:
-                await self._manager.update_persona(persona_id, system_prompt=staged)
-            finally:
-                WRITE_CONTEXT.reset(token)
-        except Exception as exc:
-            # Prepared saves are recovered separately; this entry reports the failed attempt.
-            failed = self.store.stage(
-                persona_id, original, original, "automatic", sources
-            )
-            safe = {
-                "invalid_summary",
-                "invalid_sections",
-                "invalid_content",
-                "invalid_section_content",
-                "protected_sections_modified",
-                "invalid_model_response",
-                "content_changed",
-                "memory_budget_exceeded",
-                "save_not_confirmed",
-                "protected_prompt_too_large",
-            }
-            code = (
-                str(exc)
-                if isinstance(exc, ValueError) and str(exc) in safe
-                else type(exc).__name__
-            )
-            self.store.fail(failed, code)
-            raise
-        self.logger.info(
-            "自动记忆整理完成：结果=%s，消息数=%s，剩余消息数=%s",
-            "已更新" if staged != original else "无变化",
-            len(records),
-            self.store.pending_count(),
-        )
-
     async def terminate(self):
         self._active = False
-        if self._worker:
-            self._worker.cancel()
-            await asyncio.gather(self._worker, return_exceptions=True)
         if self._manager.update_persona is self._installed_update:
             self._manager.update_persona = self._original_update
         self.dashboard.unregister()
@@ -568,13 +331,12 @@ class SelfPrompt(Star):
             if not managed:
                 catalog = self.store.catalog(persona_id, self.settings())
                 req.extra_user_content_parts.append(
-                    {
-                        "type": "text",
-                        "text": catalog_text(catalog["pages"]),
-                        "_no_save": True,
-                    }
+                    TextPart(text=catalog_text(catalog["pages"])).mark_as_temp()
                 )
             event.set_extra("self_prompt_request", id(req))
+            event.set_extra(
+                "self_prompt_self_knowledge_seen", read_sections(after)["other"]
+            )
             event.set_extra("self_prompt_reads", {})
             event.set_extra("self_prompt_creates", {})
 
@@ -583,6 +345,36 @@ class SelfPrompt(Star):
         if not persona_id:
             raise ValueError("no_persona")
         return persona_id
+
+    @filter.on_llm_request(priority=-maxsize - 1)
+    async def remind_memory(self, event: AstrMessageEvent, req: ProviderRequest):
+        """Count one admitted reply round, after the reply gate has decided."""
+        persona_id = event.get_extra("self_prompt_persona_id")
+        limits = self.settings()
+        if (
+            not persona_id
+            or not limits.enabled
+            or event.get_extra("self_prompt_counted_round")
+        ):
+            return
+        message_id = getattr(getattr(event, "message_obj", None), "message_id", "")
+        turn_key = json.dumps(
+            [str(getattr(req.conversation, "cid", "")), str(message_id or uuid.uuid4())]
+        )
+        try:
+            due = self.store.reply_round(
+                event.unified_msg_origin, persona_id, turn_key, limits.interval
+            )
+        except Exception as exc:
+            self.logger.warning("记忆维护提醒计数失败：%s", type(exc).__name__)
+            return
+        event.set_extra("self_prompt_counted_round", turn_key)
+        if due:
+            event.set_extra("self_prompt_memory_reminder", MEMORY_REMINDER)
+            if not self._lcm_managed():
+                req.extra_user_content_parts.append(
+                    TextPart(text=MEMORY_REMINDER).mark_as_temp()
+                )
 
     def _error(self, exc):
         code = str(exc) if isinstance(exc, ValueError) else "storage_error"
@@ -594,13 +386,17 @@ class SelfPrompt(Star):
 
     @filter.llm_tool(name="get_self_prompt")
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
-        """读取当前性格和人设、回复偏好、昵称列表和其他记忆。
+        """读取当前性格和人设、回复偏好、昵称列表和自我认知。
 
-        昵称可用 nickname_update 增删；
+        昵称可用 nickname_update 增删，自我认知（sections.other）可用 self_memory_update 修改；
         黑话、事实、约定和流程通过记事本工具维护。
         """
         try:
             persona = await self._manager.get_persona(self._persona(event))
+            event.set_extra(
+                "self_prompt_self_knowledge_seen",
+                read_sections(persona.system_prompt)["other"],
+            )
             return json.dumps(
                 {"ok": True, **current_memory(persona.system_prompt)},
                 ensure_ascii=False,
@@ -659,10 +455,51 @@ class SelfPrompt(Star):
                 rendered = render_current(updated)
                 event.set_extra("self_prompt_system_text", rendered)
                 event.set_extra("reply_gate_memory", rendered)
+                if updated != original:
+                    event.set_extra("self_prompt_memory_reminder", "")
                 return json.dumps(
                     {"ok": True, "nicknames": updated_names}, ensure_ascii=False
                 )
             raise ValueError("content_changed")
+        except Exception as exc:
+            return self._error(exc)
+
+    @filter.llm_tool(name="self_memory_update")
+    async def self_memory_update(self, event: AstrMessageEvent, content: str) -> str:
+        """更新自我认知，记录相处中形成的认识、习惯和需要记住的变化。
+
+        结合本轮常驻资料或 get_self_prompt 的当前正文，合并新内容并保留仍有效的旧内容。
+        遵循现有性格和人设、回复偏好；这两部分由用户维护。昵称用 nickname_update，黑话和详细事实放进记事本。
+        内容已变化时先用 get_self_prompt 重新读取，再合并更新。没有值得修改的内容时正常回复即可。
+
+        Args:
+            content(string): 自我认知更新后的完整正文；空字符串表示清空此部分。
+        """
+        try:
+            persona_id = self._persona(event)
+            original = (await self._manager.get_persona(persona_id)).system_prompt
+            before = read_sections(original)["other"]
+            if before != event.get_extra("self_prompt_self_knowledge_seen"):
+                raise ValueError("content_changed")
+            updated = replace_section(original, "other", content)
+            if updated != original:
+                token = WRITE_CONTEXT.set({"kind": "memory_tool", "expected": original})
+                try:
+                    await self._manager.update_persona(
+                        persona_id, system_prompt=updated
+                    )
+                finally:
+                    WRITE_CONTEXT.reset(token)
+            rendered = render_current(updated)
+            event.set_extra("self_prompt_system_text", rendered)
+            event.set_extra("reply_gate_memory", rendered)
+            event.set_extra("self_prompt_self_knowledge_seen", content)
+            if before != content:
+                event.set_extra("self_prompt_memory_reminder", "")
+            return json.dumps(
+                {"ok": True, "self_knowledge": content, "changed": before != content},
+                ensure_ascii=False,
+            )
         except Exception as exc:
             return self._error(exc)
 

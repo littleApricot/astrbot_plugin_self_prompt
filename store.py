@@ -66,6 +66,15 @@ class Store(MemoryQueue):
                     persona_id TEXT NOT NULL, page_id TEXT NOT NULL, stamp TEXT NOT NULL,
                     PRIMARY KEY(persona_id,page_id)
                 );
+                CREATE TABLE IF NOT EXISTS memory_reminders (
+                    origin TEXT NOT NULL, persona_id TEXT NOT NULL,
+                    rounds INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(origin,persona_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_reminder_turns (
+                    origin TEXT NOT NULL, persona_id TEXT NOT NULL, turn_key TEXT NOT NULL,
+                    PRIMARY KEY(origin,persona_id,turn_key)
+                );
             """)
 
     @staticmethod
@@ -336,6 +345,14 @@ class Store(MemoryQueue):
             db.execute(
                 "UPDATE memory_records SET state='committed' WHERE id=?", (record_id,)
             )
+            if (
+                row["kind"] in {"nickname_tool", "memory_tool"}
+                and row["original"] != row["content"]
+            ):
+                db.execute(
+                    "UPDATE memory_reminders SET rounds=0 WHERE persona_id=?",
+                    (row["persona_id"],),
+                )
             if row["scope"] is not None and row["last_message_id"] is not None:
                 db.execute(
                     "UPDATE messages SET done=1 WHERE scope=? AND id<=? AND done=0",
@@ -440,10 +457,38 @@ class Store(MemoryQueue):
             return [
                 dict(row)
                 for row in db.execute(
-                    "SELECT s.origin,COUNT(m.id) AS pending FROM scopes s LEFT JOIN messages m ON m.scope=s.id AND m.done=0 WHERE s.persona_id=? GROUP BY s.id",
+                    "SELECT origin,rounds FROM memory_reminders WHERE persona_id=? ORDER BY origin",
                     (persona_id,),
                 )
             ]
+
+    def reply_round(self, origin, persona_id, turn_key, interval):
+        """Count a new reply once; consume a reminder as soon as it becomes due."""
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            inserted = db.execute(
+                "INSERT OR IGNORE INTO memory_reminder_turns VALUES(?,?,?)",
+                (origin, persona_id, turn_key),
+            )
+            if not inserted.rowcount:
+                return False
+            db.execute(
+                "INSERT OR IGNORE INTO memory_reminders(origin,persona_id) VALUES(?,?)",
+                (origin, persona_id),
+            )
+            count = (
+                db.execute(
+                    "SELECT rounds FROM memory_reminders WHERE origin=? AND persona_id=?",
+                    (origin, persona_id),
+                ).fetchone()["rounds"]
+                + 1
+            )
+            due = count >= interval
+            db.execute(
+                "UPDATE memory_reminders SET rounds=? WHERE origin=? AND persona_id=?",
+                (0 if due else count, origin, persona_id),
+            )
+            return due
 
     def archive_tool_projection(self, persona_id, origin, originals, projected):
         """Retain affected original messages once if the agent persists its projection."""
