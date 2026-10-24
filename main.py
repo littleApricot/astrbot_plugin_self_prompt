@@ -79,7 +79,6 @@ class SelfPrompt(Star):
         manager = context.get_llm_tool_manager()
         for name, required in {
             "get_self_prompt": [],
-            "notebook_list": [],
             "notebook_read": ["page_id"],
             "notebook_create": ["title", "description", "content"],
             "notebook_update": ["page_id"],
@@ -96,9 +95,10 @@ class SelfPrompt(Star):
                         minimum=1, maximum=4000
                     )
         # Older tool registrations can remain during a hot reload.
-        old = manager.get_func("update_self_prompt")
-        if old is not None:
-            old.active = False
+        for name in ("update_self_prompt", "notebook_list"):
+            old = manager.get_func(name)
+            if old is not None:
+                old.active = False
         from .dashboard import Dashboard
 
         self.dashboard = Dashboard(self)
@@ -536,20 +536,6 @@ class SelfPrompt(Star):
             persona = await self._manager.get_persona(self._persona(event))
             return json.dumps(
                 {"ok": True, **current_memory(persona.system_prompt)},
-                ensure_ascii=False,
-            )
-        except Exception as exc:
-            return self._error(exc)
-
-    @filter.llm_tool(name="notebook_list")
-    async def notebook_list(self, event: AstrMessageEvent) -> str:
-        """Read the full current notebook directory to find pages by their purpose."""
-        try:
-            return json.dumps(
-                {
-                    "ok": True,
-                    **self.store.catalog(self._persona(event), self.settings()),
-                },
                 ensure_ascii=False,
             )
         except Exception as exc:

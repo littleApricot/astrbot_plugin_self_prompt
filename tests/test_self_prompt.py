@@ -32,9 +32,9 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tools_and_request_have_no_owner_bookkeeping(self):
         self.assertFalse(hasattr(self.p, "update_self_prompt"))
+        self.assertFalse(hasattr(self.p, "notebook_list"))
         for name in (
             "get_self_prompt",
-            "notebook_list",
             "notebook_read",
             "notebook_create",
             "notebook_update",
@@ -57,6 +57,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await _ensure_persona_and_skills(req, {}, self.s.context, self.s.event)
         self.assertIn("notebook_create", req.func_tool.names())
         self.assertNotIn("update_self_prompt", req.func_tool.names())
+        self.assertNotIn("notebook_list", req.func_tool.names())
 
     async def test_legacy_other_memory_moves_once_without_loss(self):
         old = replace_section("Nickname Echo", "memory", "原文" * 9000)
@@ -165,7 +166,6 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.p.notebook_update(event, page["page_id"], content="complete")
             )["ok"]
         )
-        self.assertNotIn("revision", await self.p.notebook_list(event))
 
     async def collect(self, count, start=0, origin="test:GroupMessage:room"):
         for number in range(start, start + count):

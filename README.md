@@ -103,7 +103,6 @@ AstrBot 的常驻记忆与可维护记事本。常驻记忆每轮加载，日常
 | 工具 | 必填参数 | 可选参数 | 成功结果 |
 | --- | --- | --- | --- |
 | get_self_prompt | 无 | 无 | ok、fixed_prompt、sections；sections 只含 persona 和 output_preferences |
-| notebook_list | 无 | 无 | 完整 pages、page_count、max_pages、remaining_pages、catalog_bytes |
 | notebook_read | page_id | offset=0、limit=4000 | 页面名称、描述、正文片段及分页信息 |
 | notebook_create | title、description、content | 无 | 页面标识、名称、描述、剩余容量 |
 | notebook_update | page_id | title、description、content，至少提供一个 | 当前页面标识、名称、描述和容量 |
