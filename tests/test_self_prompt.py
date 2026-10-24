@@ -512,3 +512,98 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await other._ensure_layout("default")
         self.assertEqual(other.store.pending_count(), 1)
         await other.terminate()
+
+    async def test_consolidation_reads_notebook_and_retains_original_sources(self):
+        self.s.config["auto_memory_message_interval"] = 2
+        page = self.p.store.create_page(
+            "default",
+            "称呼线索",
+            "理解对话对象",
+            "群友把机器人叫作新绰号，lljy 表示柳浪家园。",
+            self.p.settings(),
+        )
+        await self.collect(2)
+        before = (await self.s.manager.get_persona("default")).system_prompt
+        persona = (
+            read_sections(before)["persona"]
+            + "\n新绰号是机器人的称呼；lljy＝柳浪家园。"
+        )
+        self.s.provider.text = json.dumps(
+            {"updates": {"persona": persona}}, ensure_ascii=False
+        )
+        await self.p._process_ready()
+        payload = json.loads(self.s.provider.calls[0]["prompt"])
+        notes = [r for r in payload["history"] if r.get("source_type") == "notebook"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("新绰号", notes[0]["text"])
+        self.assertNotIn("page_stamp", notes[0])
+        actual = (await self.s.manager.get_persona("default")).system_prompt
+        self.assertIn("新绰号", read_sections(actual)["persona"])
+        automatic = next(
+            r for r in self.p.store.records("default") if r["kind"] == "automatic"
+        )
+        sources = self.p.store.record("default", automatic["id"])["sources"]
+        self.assertEqual(len(sources), 3)
+        full = self.p.store.page("default", page["page_id"])
+        from astrbot_plugin_self_prompt.store import page_stamp
+
+        self.p.store.change_page(
+            "default",
+            page["page_id"],
+            page_stamp(full),
+            {},
+            self.p.settings(),
+            delete=True,
+        )
+        self.assertEqual(
+            self.p.store.record("default", automatic["id"])["sources"][-1]["text"],
+            notes[0]["text"],
+        )
+        self.assertEqual(self.p.store.notebook_sources("default"), [])
+        self.assertEqual(self.p.store.pending_count(), 0)
+
+    async def test_unchanged_notebook_is_not_reread_and_edits_are_retried_after_failure(
+        self,
+    ):
+        from astrbot_plugin_self_prompt.store import page_stamp
+
+        self.s.config["auto_memory_message_interval"] = 1
+        page = self.p.store.create_page(
+            "default", "术语", "含义", "old term", self.p.settings()
+        )
+        await self.collect(1)
+        await self.p._process_ready()
+        self.assertEqual(self.p.store.notebook_sources("default"), [])
+        await self.collect(1, 1)
+        await self.p._process_ready()
+        self.assertFalse(
+            any(
+                r.get("source_type") == "notebook"
+                for r in json.loads(self.s.provider.calls[-1]["prompt"])["history"]
+            )
+        )
+        full = self.p.store.page("default", page["page_id"])
+        self.p.store.change_page(
+            "default",
+            page["page_id"],
+            page_stamp(full),
+            {"content": "new term"},
+            self.p.settings(),
+        )
+        self.s.provider.text = "invalid result"
+        await self.collect(1, 2)
+        await self.p._process_ready()
+        self.assertEqual(self.p.store.pending_count(), 1)
+        self.assertEqual(
+            self.p.store.notebook_sources("default")[0]["text"], "new term"
+        )
+        self.s.provider.text = '{"updates":{}}'
+        self.p._retry_after.clear()
+        await self.p._process_ready()
+        self.assertEqual(self.p.store.notebook_sources("default"), [])
+        record = next(
+            r for r in self.p.store.records("default") if r["kind"] == "automatic"
+        )
+        saved = self.p.store.record("default", record["id"])
+        self.assertFalse(saved["changed"])
+        self.assertEqual(saved["sources"][-1]["text"], "new term")

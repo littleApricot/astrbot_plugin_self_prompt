@@ -62,6 +62,10 @@ class Store(MemoryQueue):
                     source_key TEXT PRIMARY KEY, persona_id TEXT NOT NULL,
                     origin TEXT NOT NULL, message TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS notebook_memory_reads (
+                    persona_id TEXT NOT NULL, page_id TEXT NOT NULL, stamp TEXT NOT NULL,
+                    PRIMARY KEY(persona_id,page_id)
+                );
             """)
 
     @staticmethod
@@ -108,6 +112,41 @@ class Store(MemoryQueue):
         if row is None:
             raise ValueError("page_not_found")
         return dict(row)
+
+    def notebook_sources(self, persona_id):
+        """Snapshot new/changed pages; acknowledge only with a committed memory record."""
+        with closing(self._connect()) as db:
+            pages = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT * FROM notebook_pages WHERE persona_id=? ORDER BY rowid",
+                    (persona_id,),
+                )
+            ]
+            seen = {
+                row["page_id"]: row["stamp"]
+                for row in db.execute(
+                    "SELECT page_id,stamp FROM notebook_memory_reads WHERE persona_id=?",
+                    (persona_id,),
+                )
+            }
+        return [
+            {
+                "source_type": "notebook",
+                "role": "notebook",
+                "page_id": page["page_id"],
+                "page_stamp": page_stamp(page),
+                "title": page["title"],
+                "description": page["description"],
+                "text": page["content"],
+                "sender_name": "记事本《" + page["title"] + "》",
+                "sender_id": "",
+                "origin": "notebook:" + persona_id,
+                "time": now(),
+            }
+            for page in pages
+            if seen.get(page["page_id"]) != page_stamp(page)
+        ]
 
     def create_page(self, persona_id, title, description, content, limits):
         page = {
@@ -294,6 +333,17 @@ class Store(MemoryQueue):
                     "UPDATE messages SET done=1 WHERE scope=? AND id<=? AND done=0",
                     (row["scope"], row["last_message_id"]),
                 )
+            if row["kind"] == "automatic":
+                for source in json.loads(row["sources"]):
+                    if source.get("source_type") == "notebook":
+                        db.execute(
+                            "INSERT INTO notebook_memory_reads VALUES(?,?,?) ON CONFLICT(persona_id,page_id) DO UPDATE SET stamp=excluded.stamp",
+                            (
+                                row["persona_id"],
+                                source["page_id"],
+                                source["page_stamp"],
+                            ),
+                        )
 
     def fail(self, record_id, error):
         with closing(self._connect()) as db, db:

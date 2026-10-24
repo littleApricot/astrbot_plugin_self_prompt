@@ -175,3 +175,40 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         restored = (await self.get("state")).json()
         self.assertEqual(restored["memory"]["fixed_prompt"], "Latest fixed")
         self.assertEqual(restored["memory"]["sections"], detail["memory"]["sections"])
+
+    async def test_notebook_original_is_visible_in_memory_sources_after_page_deletion(
+        self,
+    ):
+        page = (
+            await self.post(
+                "page",
+                persona_id="default",
+                action="create",
+                title="术语来源",
+                description="聊天术语",
+                content="newname 是机器人称呼",
+            )
+        ).json()
+        self.s.config["auto_memory_message_interval"] = 1
+        await self.s.plugin.collect_history(self.s.message(999, text="这轮需要整理"))
+        await self.s.plugin._process_ready()
+        records = (await self.get("records", persona_id="default")).json()["records"]
+        record = next(r for r in records if r["kind"] == "automatic")
+        full = (
+            await self.get("page", persona_id="default", page_id=page["page_id"])
+        ).json()
+        await self.post(
+            "page",
+            persona_id="default",
+            action="delete",
+            page_id=page["page_id"],
+            stamp=full["stamp"],
+        )
+        detail = (
+            await self.get("records", persona_id="default", record_id=record["id"])
+        ).json()
+        source = next(
+            s for s in detail["sources"] if s.get("source_type") == "notebook"
+        )
+        self.assertEqual(source["text"], "newname 是机器人称呼")
+        self.assertEqual(source["sender_name"], "记事本《术语来源》")

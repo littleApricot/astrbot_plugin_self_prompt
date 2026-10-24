@@ -363,6 +363,7 @@ class SelfPrompt(Star):
         records = self.store.batch(scope["id"], limits.interval)
         if len(records) < limits.interval:
             return
+        sources = [*records, *self.store.notebook_sources(persona_id)]
         original = (await self._manager.get_persona(persona_id)).system_prompt
         staged = original
         provider = (
@@ -374,8 +375,12 @@ class SelfPrompt(Star):
             raise ValueError("model_not_configured")
         # Media references are retained for the owner, but only text went to this model.
         inputs = [
-            {key: value for key, value in row.items() if key != "parts"}
-            for row in records
+            {
+                key: value
+                for key, value in row.items()
+                if key not in {"parts", "page_stamp"}
+            }
+            for row in sources
         ]
         pending = [inputs]
         try:
@@ -411,7 +416,7 @@ class SelfPrompt(Star):
                 {
                     "kind": "automatic",
                     "expected": original,
-                    "sources": records,
+                    "sources": sources,
                     "scope": scope["id"],
                     "last_id": records[-1]["id"],
                 }
@@ -423,7 +428,7 @@ class SelfPrompt(Star):
         except Exception as exc:
             # Prepared saves are recovered separately; this entry reports the failed attempt.
             failed = self.store.stage(
-                persona_id, original, original, "automatic", records
+                persona_id, original, original, "automatic", sources
             )
             safe = {
                 "invalid_summary",
@@ -519,6 +524,7 @@ class SelfPrompt(Star):
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
         """读取当前固定设定和常驻记忆，日常聊天只读。
 
+        稳定称呼、黑话和关系由后台整理纳入常驻记忆；
         其他值得记住的事实、约定和流程通过记事本工具维护。
         """
         try:
@@ -587,6 +593,7 @@ class SelfPrompt(Star):
         """遇到值得记住的事实、事件、待办、约定或可复用的流程和 SOP 时主动保存。
 
         先检查本轮目录，优先用 notebook_update 合并到相关页，避免一个小事实新建一页。
+        常用称呼、黑话和必要关系由后台整理进入常驻记忆，不另建纯称呼或黑话索引页；详细事件背景仍可记录。
         个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
         保存成功后才表示记下来了。页数用尽时整理已有内容，删除明确失效的页面后再新建。
         记事本内容不能覆盖固定设定。
@@ -637,6 +644,7 @@ class SelfPrompt(Star):
         """把新事实、约定或纠正合并到相关页面，保留仍然有效的其他内容。
 
         先读取当前页；整体替换正文前分段读完整页。出现内容变化时重新读取再合并。
+        已进入常驻记忆的称呼与黑话，不在记事本中再维护另一份索引；详细背景和具体流程可保留。
         个人事实标明对应成员和适用会话；临时玩笑、推测及引用不直接当成已确认事实。
         保存成功后才表示记下来了，页面内容仍遵守固定设定。
 

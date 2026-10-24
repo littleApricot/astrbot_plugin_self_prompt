@@ -122,3 +122,36 @@ class StoreTests(unittest.TestCase):
             for value in (0, -1, True, "100", None):
                 with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                     Settings.read({key: value})
+
+    def test_notebook_sources_acknowledge_only_successful_snapshots(self):
+        page = self.store.create_page(
+            "p", "Terms", "Names and slang", "old nickname", Settings()
+        )
+        sources = self.store.notebook_sources("p")
+        self.assertEqual(len(sources), 1)
+        failed = self.store.stage("p", "before", "before", "automatic", sources)
+        self.store.fail(failed, "test failure")
+        self.assertEqual(self.store.notebook_sources("p")[0]["text"], "old nickname")
+        full = self.store.page("p", page["page_id"])
+        self.store.change_page(
+            "p",
+            page["page_id"],
+            page_stamp(full),
+            {"content": "new nickname"},
+            Settings(),
+        )
+        committed = self.store.stage("p", "same", "same", "automatic", sources)
+        self.store.finish(committed)
+        self.assertEqual(self.store.notebook_sources("p")[0]["text"], "new nickname")
+        latest = self.store.notebook_sources("p")
+        final = self.store.stage("p", "same", "same", "automatic", latest)
+        self.store.finish(final)
+        self.assertEqual(Store(self.store.path).notebook_sources("p"), [])
+        current = self.store.page("p", page["page_id"])
+        self.store.change_page(
+            "p", page["page_id"], page_stamp(current), {}, Settings(), delete=True
+        )
+        self.assertEqual(
+            self.store.record("p", final)["sources"][0]["text"], "new nickname"
+        )
+        self.assertEqual(self.store.notebook_sources("p"), [])
