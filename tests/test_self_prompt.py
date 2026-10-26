@@ -50,7 +50,7 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(memory), {"ok", "sections"})
         self.assertEqual(
             set(memory["sections"]),
-            {"persona", "output_preferences", "nicknames", "other"},
+            {"persona", "output_preferences", "chat_examples", "nicknames", "other"},
         )
         self.assertNotIn("self_prompt:", self.s.request.system_prompt)
         self.assertNotIn("版本", self.s.request.system_prompt)

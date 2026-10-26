@@ -7,13 +7,15 @@
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-  <header><div><h1>记忆与记事本</h1><p>人设和回复偏好由你维护，机器人可维护昵称和自我认知。</p></div>
+  <header><div><h1>记忆与记事本</h1><p>人设、回复偏好和聊天示例由你维护，机器人可维护昵称和自我认知。</p></div>
     <label>当前人格 <select id="persona" aria-label="当前人格"></select></label><button id="refresh">刷新</button></header>
   <p id="status" role="status" aria-live="polite"></p>
   <nav aria-label="管理内容"><button data-tab="memory" class="active">当前记忆</button><button data-tab="notebook">记事本</button><button data-tab="records">记忆记录</button><button data-tab="settings">配置</button></nav>
   <section id="memory" class="panel"><div class="stats" id="stats"></div><div id="budget-actions"></div>
     <label>性格和人设<textarea id="character" rows="6"></textarea></label>
     <label>回复偏好<textarea id="preferences" rows="5"></textarea></label>
+    <label>聊天示例<textarea id="chat-examples" rows="12" placeholder="填写聊天情境、群友消息和期望的机器人回复。"></textarea></label>
+    <p class="muted">用于示范语气、接话方式以及表情包和语音的使用，随人设每轮加载，由你编辑。</p>
     <fieldset class="nickname-list"><legend>昵称</legend><div id="nicknames"></div><button id="add-nickname" type="button">添加昵称</button></fieldset>
     <label>自我认知<textarea id="other" rows="7"></textarea></label>
     <button id="save-memory" class="primary">保存记忆</button><p id="progress" class="muted"></p>
@@ -35,7 +37,7 @@
     <div class="toolbar"><button id="save-page" class="primary">保存页面</button><button id="delete-page" class="danger">删除页面</button></div>
   </dialog>
   <dialog id="record-detail"><form method="dialog"><button class="close" aria-label="关闭">关闭</button></form><h2>记忆记录</h2><p id="record-meta"></p><div id="record-memory"></div><h3>本次原文来源</h3><div id="sources"></div>
-    <label class="check"><input id="include-owner" type="checkbox">同时恢复这条记录中的性格和人设、回复偏好</label><button id="restore-memory">将这份记忆恢复为当前内容</button><p id="record-status" role="status"></p>
+    <label class="check"><input id="include-owner" type="checkbox">同时恢复这条记录中的性格和人设、回复偏好、聊天示例</label><button id="restore-memory">将这份记忆恢复为当前内容</button><p id="record-status" role="status"></p>
   </dialog>
   <script type="module" src="./app.js"></script>
 </body>

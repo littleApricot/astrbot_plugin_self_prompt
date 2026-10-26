@@ -2,7 +2,7 @@
   "$meta": {
     "schema_version": 1,
     "name": "littleApricot 记忆与记事本",
-    "version": "v0.4.2",
+    "version": "v0.8.0",
     "description": "记忆与记事本插件发布源",
     "repository": "https://github.com/littleApricot/astrbot_plugin_self_prompt"
   },
@@ -10,10 +10,10 @@
     "author": "littleApricot",
     "name": "astrbot_plugin_self_prompt",
     "display_name": "记忆与记事本",
-    "desc": "常驻记忆按消息数整理并保留原文来源，记事本目录常驻、正文按需读取。",
-    "version": "v0.4.2",
+    "desc": "人设、回复偏好与聊天示例由用户维护，机器人可主动维护昵称、自我认知和记事本，连续未修改时临时提醒。",
+    "version": "v0.8.0",
     "repo": "https://github.com/littleApricot/astrbot_plugin_self_prompt",
-    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.4.2.zip",
+    "download_url": "https://github.com/littleApricot/astrbot_plugin_self_prompt/archive/refs/tags/v0.8.0.zip",
     "astrbot_version": ">=4.29.1,<4.30.0"
   }
 }

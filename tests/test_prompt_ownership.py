@@ -1,4 +1,4 @@
-"""Specify owner and model write boundaries for the four-section layout."""
+"""Specify owner and model write boundaries for the current section layout."""
 
 import unittest
 

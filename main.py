@@ -386,7 +386,7 @@ class SelfPrompt(Star):
 
     @filter.llm_tool(name="get_self_prompt")
     async def get_self_prompt(self, event: AstrMessageEvent) -> str:
-        """读取当前性格和人设、回复偏好、昵称列表和自我认知。
+        """读取当前性格和人设、回复偏好、聊天示例、昵称列表和自我认知。
 
         昵称可用 nickname_update 增删，自我认知（sections.other）可用 self_memory_update 修改；
         黑话、事实、约定和流程通过记事本工具维护。
@@ -469,7 +469,7 @@ class SelfPrompt(Star):
         """更新自我认知，记录相处中形成的认识、习惯和需要记住的变化。
 
         结合本轮常驻资料或 get_self_prompt 的当前正文，合并新内容并保留仍有效的旧内容。
-        遵循现有性格和人设、回复偏好；这两部分由用户维护。昵称用 nickname_update，黑话和详细事实放进记事本。
+        遵循现有性格和人设、回复偏好与聊天示例；这三部分由用户维护。昵称用 nickname_update，黑话和详细事实放进记事本。
         内容已变化时先用 get_self_prompt 重新读取，再合并更新。没有值得修改的内容时正常回复即可。
 
         Args:

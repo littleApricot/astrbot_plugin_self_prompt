@@ -15,7 +15,7 @@ from astrbot_plugin_self_prompt.prompt_document import (
 from astrbot_plugin_self_prompt.tests.support import Sandbox, legacy_prompt
 
 
-def test_old_layout_keeps_all_content_in_four_current_sections():
+def test_old_layout_keeps_all_content_in_current_sections():
     original = (
         "外部附注\n"
         + legacy_prompt(
@@ -31,6 +31,7 @@ def test_old_layout_keeps_all_content_in_four_current_sections():
     assert sections == {
         "persona": "用户原固定内容  \n\n\n原始人设",
         "output_preferences": "Short",
+        "chat_examples": "",
         "nicknames": ["机器人：阿蓝"],
         "other": "原有其他记忆",
     }
@@ -40,7 +41,7 @@ def test_old_layout_keeps_all_content_in_four_current_sections():
     assert "固定设定" not in rendered and "# 长期记忆" not in rendered
     assert all(
         "## " + title in rendered
-        for title in ("性格和人设", "回复偏好", "昵称", "自我认知")
+        for title in ("性格和人设", "回复偏好", "聊天示例", "昵称", "自我认知")
     )
 
 
@@ -70,7 +71,7 @@ async def test_save_guard_rejects_protected_memory_tool_changes():
     s = await Sandbox().open()
     try:
         original = (await s.manager.get_persona("default")).system_prompt
-        for key in ("persona", "output_preferences", "nicknames"):
+        for key in ("persona", "output_preferences", "chat_examples", "nicknames"):
             token = WRITE_CONTEXT.set({"kind": "memory_tool", "expected": original})
             try:
                 with pytest.raises(ValueError, match="protected_sections_modified"):

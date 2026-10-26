@@ -240,7 +240,10 @@ class Dashboard:
                 current = current_memory(persona.system_prompt)["sections"]
                 sections = {
                     **sections,
-                    **{key: current[key] for key in ("persona", "output_preferences")},
+                    **{
+                        key: current[key]
+                        for key in ("persona", "output_preferences", "chat_examples")
+                    },
                 }
             updated = owner_edit(persona.system_prompt, sections)
             token = WRITE_CONTEXT.set(

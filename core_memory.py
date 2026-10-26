@@ -36,14 +36,20 @@ def editable_bytes(prompt):
 
 
 def render_current(prompt):
-    """Render the four current sections without storage markup."""
+    """Render current sections without storage markup."""
     return MARKERS.sub("", ensure_layout(prompt)).strip()
 
 
 def owner_edit(prompt, sections):
     """Apply a dashboard edit without losing protected surrounding notes."""
-    if not isinstance(sections, dict) or set(sections) != set(CORE_SECTIONS):
+    required = set(CORE_SECTIONS) - {"chat_examples"}
+    if (
+        not isinstance(sections, dict)
+        or not required.issubset(sections)
+        or not set(sections).issubset(CORE_SECTIONS)
+    ):
         raise ValueError("invalid_sections")
+    # A dashboard opened before the upgrade must preserve any saved examples.
     result = ensure_layout(prompt)
     for key, text in sections.items():
         if key == "nicknames":

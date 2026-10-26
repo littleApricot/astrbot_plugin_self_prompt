@@ -10,6 +10,7 @@ from .nicknames import nickname_text, read_nicknames
 SECTIONS = {
     "persona": "性格和人设",
     "output_preferences": "回复偏好",
+    "chat_examples": "聊天示例",
     "nicknames": "昵称",
     "other": "自我认知",
 }
@@ -81,11 +82,11 @@ def _document(sections: dict[str, str]) -> str:
 
 
 def ensure_layout(prompt: str) -> str:
-    """Retain legacy text while adopting four independently owned sections."""
+    """Retain legacy text while adopting independently owned sections."""
     if START in prompt or END in prompt:
         begin, end = _bounds(prompt, START, END)
-        spans = _section_spans(prompt[begin:end])
-        if len(MARKERS.findall(prompt)) != 2 * (len(SECTIONS) + 1):
+        spans = _section_spans(prompt[begin:end], optional=("chat_examples",))
+        if len(MARKERS.findall(prompt)) != 2 * (len(spans) + 1):
             raise ValueError("unexpected_section_markers")
         match = spans["nicknames"]
         layout = (
@@ -93,6 +94,14 @@ def ensure_layout(prompt: str) -> str:
             + nickname_text(read_nicknames(match.group(1)))
             + prompt[begin + match.end(1) :]
         )
+        if "chat_examples" not in spans:
+            # Insert after preferences without rewriting existing section text.
+            position = begin + spans["output_preferences"].end()
+            section = (
+                "\n\n## 聊天示例\n<!-- self_prompt:chat_examples -->\n"
+                "\n<!-- /self_prompt:chat_examples -->"
+            )
+            layout = layout[:position] + section + layout[position:]
         return layout.replace(
             "## 其他\n<!-- self_prompt:other -->",
             "## 自我认知\n<!-- self_prompt:other -->",
