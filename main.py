@@ -102,7 +102,7 @@ class SelfPrompt(Star):
     def settings(self):
         return Settings.read(self.config)
 
-    def _temporary_context(self, event):
+    def _system_context(self, event):
         persona_id = event.get_extra("self_prompt_persona_id")
         if not persona_id:
             return ""
@@ -111,7 +111,7 @@ class SelfPrompt(Star):
         )
         return "\n\n".join(
             text
-            for text in (directory, event.get_extra("self_prompt_memory_reminder", ""))
+            for text in (event.get_extra("self_prompt_system_text", ""), directory)
             if text
         )
 
@@ -129,8 +129,10 @@ class SelfPrompt(Star):
     def lcm_context_rules(self):
         return {
             "owner": "astrbot_plugin_self_prompt",
-            "system": lambda event: event.get_extra("self_prompt_system_text", ""),
-            "temporary": self._temporary_context,
+            "system": self._system_context,
+            "temporary": lambda event: event.get_extra(
+                "self_prompt_memory_reminder", ""
+            ),
             "history_tools": {
                 "get_self_prompt": "keep",
                 "nickname_update": "keep",
@@ -308,31 +310,31 @@ class SelfPrompt(Star):
         await self._ensure_layout(persona_id)
         after = (await self._manager.get_persona(persona_id)).system_prompt
         rendered = render_current(after)
+        event.set_extra("self_prompt_persona_id", persona_id)
         event.set_extra("reply_gate_memory", rendered)
         event.set_extra("self_prompt_system_text", rendered)
         managed = self._lcm_managed()
         system = req.system_prompt or ""
-        if before and before in system:
-            system = system.replace(before, "" if managed else rendered, 1)
+        standalone = self._system_context(event) if not managed else ""
+        previous = event.get_extra("self_prompt_standalone_system", "")
+        if not managed and previous and previous in system:
+            system = system.replace(previous, standalone, 1)
+        elif before and before in system:
+            system = system.replace(before, "" if managed else standalone, 1)
         elif after and after in system:
-            system = system.replace(after, "" if managed else rendered, 1)
-        elif not managed and rendered not in system:
-            system += "\n\n" + rendered
+            system = system.replace(after, "" if managed else standalone, 1)
+        elif not managed and standalone not in system:
+            system += "\n\n" + standalone
         req.system_prompt = system
         if not managed:
+            event.set_extra("self_prompt_standalone_system", standalone)
             projected = project_history(req.contexts)
             self.store.archive_tool_projection(
                 persona_id, event.unified_msg_origin, req.contexts, projected
             )
             req.contexts = projected
-        event.set_extra("self_prompt_persona_id", persona_id)
         event.set_extra("self_prompt_model", req.model)
         if event.get_extra("self_prompt_request") != id(req):
-            if not managed:
-                catalog = self.store.catalog(persona_id, self.settings())
-                req.extra_user_content_parts.append(
-                    TextPart(text=catalog_text(catalog["pages"])).mark_as_temp()
-                )
             event.set_extra("self_prompt_request", id(req))
             event.set_extra(
                 "self_prompt_self_knowledge_seen", read_sections(after)["other"]

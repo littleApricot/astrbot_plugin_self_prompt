@@ -130,13 +130,13 @@ class PluginIntegrationTests(unittest.IsolatedAsyncioTestCase):
         req = await self.s.prepare(event)
         req.contexts = [{"role": "user", "content": "old full reply context"}]
         await self.p.prepare_prompt_tools(event, req)
-        self.assertIn("流程", req.extra_user_content_parts[0]["text"])
-        self.assertNotIn("private page body", str(req.extra_user_content_parts))
-        self.assertEqual(len(req.extra_user_content_parts), 1)
+        self.assertIn("流程", req.system_prompt)
+        self.assertNotIn("private page body", req.system_prompt)
+        self.assertEqual(req.system_prompt.count("[记事本目录]"), 1)
+        self.assertEqual(req.extra_user_content_parts, [])
         self.assertEqual(
             req.contexts, [{"role": "user", "content": "old full reply context"}]
         )
-        self.assertTrue(req.extra_user_content_parts[0]["_no_save"])
         data = json.loads(await self.p.notebook_read(event, saved["page_id"]))
         self.assertEqual(data["content"], "private page body")
 
