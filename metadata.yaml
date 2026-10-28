@@ -1,7 +1,7 @@
 name: astrbot_plugin_self_prompt
 display_name: 记忆与记事本
 desc: 人设、回复偏好与聊天示例由用户维护，机器人可主动维护昵称、自我认知和记事本，连续未修改时临时提醒。
-version: v0.8.1
+version: v0.8.2
 author: littleApricot
 repo: https://github.com/littleApricot/astrbot_plugin_self_prompt
 astrbot_version: ">=4.29.1,<4.30.0"

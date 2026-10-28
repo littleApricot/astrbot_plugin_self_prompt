@@ -102,16 +102,19 @@ class SelfPrompt(Star):
     def settings(self):
         return Settings.read(self.config)
 
-    def _system_context(self, event):
+    def _catalog_context(self, event):
         persona_id = event.get_extra("self_prompt_persona_id")
         if not persona_id:
             return ""
-        directory = catalog_text(
-            self.store.catalog(persona_id, self.settings())["pages"]
-        )
+        return catalog_text(self.store.catalog(persona_id, self.settings())["pages"])
+
+    def _system_context(self, event):
         return "\n\n".join(
             text
-            for text in (event.get_extra("self_prompt_system_text", ""), directory)
+            for text in (
+                event.get_extra("self_prompt_system_text", ""),
+                self._catalog_context(event),
+            )
             if text
         )
 
@@ -129,6 +132,27 @@ class SelfPrompt(Star):
     def lcm_context_rules(self):
         return {
             "owner": "astrbot_plugin_self_prompt",
+            "prompt_blocks": [
+                {
+                    "key": "memory",
+                    "kind": "memory",
+                    "content": lambda event: event.get_extra(
+                        "self_prompt_system_text", ""
+                    ),
+                },
+                {
+                    "key": "notebook_catalog",
+                    "kind": "notebook_catalog",
+                    "content": self._catalog_context,
+                },
+                {
+                    "key": "maintenance_reminder",
+                    "kind": "memory_reminder",
+                    "content": lambda event: event.get_extra(
+                        "self_prompt_memory_reminder", ""
+                    ),
+                },
+            ],
             "system": self._system_context,
             "temporary": lambda event: event.get_extra(
                 "self_prompt_memory_reminder", ""
